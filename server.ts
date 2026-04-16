@@ -303,7 +303,7 @@ async function startServer() {
       if (apiKey && apiKey !== 'mock-key' && apiKey !== 'MY_GEMINI_API_KEY') {
         try {
           const response = await ai.models.generateContent({
-            model: 'gemini-3.1-flash-preview',
+            model: 'gemini-1.5-flash',
             contents: prompt,
             config: {
               responseMimeType: "application/json",
