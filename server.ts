@@ -104,26 +104,30 @@ async function startServer() {
 
       let syncedCount = 0;
       for (const issue of normalizedIssues) {
-        // Map status
+        // 1. BỌC THÉP TITLE: Nếu GitHub không có title, tự động gán tên mặc định
+        const safeTitle = issue.title || `GitHub Task #${issue.id}`;
+
+        // 2. Map status
         let status = 'To Do';
         if (issue.state === 'closed') status = 'Done';
         else if (issue.assignees && issue.assignees.length > 0) status = 'In Progress';
 
-        // Map story points (random 1-5 if not available)
+        // 3. Map story points (random 1-5 if not available)
         const storyPoints = issue.storyPoints || Math.floor(Math.random() * 5) + 1;
 
+        // 4. Upsert an toàn
         await prisma.task.upsert({
-          where: { id: issue.id },
+          where: { id: issue.id.toString() }, // Đảm bảo ID luôn là String
           update: {
-            title: issue.title,
+            title: safeTitle, // Dùng safeTitle thay vì issue.title
             status: status,
             storyPoints: storyPoints,
             updatedAt: new Date(issue.updatedAt || new Date()),
             completedAt: issue.closedAt ? new Date(issue.closedAt) : null,
           },
           create: {
-            id: issue.id,
-            title: issue.title,
+            id: issue.id.toString(),
+            title: safeTitle, // Dùng safeTitle
             status: status,
             storyPoints: storyPoints,
             createdAt: new Date(issue.createdAt || new Date()),
