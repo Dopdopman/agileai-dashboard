@@ -1,5 +1,7 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
+import { createServer as createViteServer } from 'vite';
+import path from 'path';
 import jwt from 'jsonwebtoken';
 import cors from 'cors';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -22,11 +24,6 @@ async function startServer() {
   }));
 
   app.use(express.json());
-
-  // --- ROOT ROUTE ---
-  app.get('/', (req, res) => {
-    res.send('AgileAI API Backend is running perfectly on Render! 🚀');
-  });
 
   // --- AUTHENTICATION SYSTEM (JWT) ---
   app.post('/api/auth/login', (req, res) => {
@@ -89,61 +86,53 @@ async function startServer() {
     }
 
     try {
-      // Lấy Sprint, Project và User mặc định từ DB
-      const currentSprint = await prisma.sprint.findFirst({
-        orderBy: { startDate: 'desc' }
-      });
+      const currentSprint = await prisma.sprint.findFirst({ orderBy: { startDate: 'desc' } });
       const defaultProject = await prisma.project.findFirst();
       const defaultUser = await prisma.user.findFirst();
 
-      if (!currentSprint || !defaultProject) {
-        res.status(400).json({ error: 'Missing required Sprint or Project in database.' });
+      if (!currentSprint || !defaultProject || !defaultUser) {
+        res.status(400).json({ error: 'Missing default Sprint, Project, or User in database.' });
         return;
       }
 
-      // Fetch dữ liệu từ GitHub
+      // Use the new Integration Module
       const githubService = new GitHubService(githubToken || process.env.GITHUB_TOKEN || '');
       const normalizedIssues = await githubService.fetchIssues(repoOwner, repoName);
 
+      // XÓA SẠCH toàn bộ tasks cũ của Sprint hiện tại
+      await prisma.task.deleteMany({ where: { sprintId: currentSprint.id } });
+
       let syncedCount = 0;
-
-      // Lưu dữ liệu thật vào Database
       for (const issue of normalizedIssues) {
-        // Bọc thép dữ liệu: Xử lý ngày tháng an toàn
-        const createdAt = issue.createdAt || issue.created_at ? new Date(issue.createdAt || issue.created_at) : new Date();
-        const updatedAt = issue.updatedAt || issue.updated_at ? new Date(issue.updatedAt || issue.updated_at) : new Date();
-        const title = issue.title || 'Untitled Task';
-        
-        // Trích xuất status
+        // Map status
         let status = 'To Do';
-        const issueState = (issue.state || '').toLowerCase();
-        if (issueState === 'closed') {
-          status = 'Done';
-        } else if (issue.assignee) {
-          status = 'In Progress';
-        }
+        if (issue.state === 'closed') status = 'Done';
+        else if (issue.assignees && issue.assignees.length > 0) status = 'In Progress';
 
-        // Random story points từ 1-5
-        const storyPoints = Math.floor(Math.random() * 5) + 1;
+        // Map story points (random 1-5 if not available)
+        const storyPoints = issue.storyPoints || Math.floor(Math.random() * 5) + 1;
 
-        // Upsert vào bảng Task
         await prisma.task.upsert({
-          where: { githubId: issue.id.toString() },
+          where: { id: issue.id },
           update: {
-            title,
-            status,
-            updatedAt
+            title: issue.title,
+            status: status,
+            storyPoints: storyPoints,
+            updatedAt: new Date(issue.updatedAt || new Date()),
+            completedAt: issue.closedAt ? new Date(issue.closedAt) : null,
           },
           create: {
-            githubId: issue.id.toString(),
-            title,
-            status,
-            storyPoints,
-            sprintId: currentSprint.id,
+            id: issue.id,
+            title: issue.title,
+            status: status,
+            storyPoints: storyPoints,
+            createdAt: new Date(issue.createdAt || new Date()),
+            updatedAt: new Date(issue.updatedAt || new Date()),
+            startedAt: status !== 'To Do' ? new Date(issue.createdAt || new Date()) : null,
+            completedAt: issue.closedAt ? new Date(issue.closedAt) : null,
             projectId: defaultProject.id,
-            assigneeId: defaultUser ? defaultUser.id : null,
-            createdAt,
-            updatedAt
+            sprintId: currentSprint.id,
+            assigneeId: defaultUser.id,
           }
         });
         syncedCount++;
@@ -151,6 +140,7 @@ async function startServer() {
       
       res.json({ 
         message: `Đã đồng bộ thành công ${syncedCount} tasks từ GitHub.`,
+        sampleData: normalizedIssues.slice(0, 2) 
       });
     } catch (error: any) {
       console.error("Sync Error:", error);
@@ -184,7 +174,7 @@ async function startServer() {
   const getSprintId = async (req: Request, res: Response) => {
     let sprintId = req.query.sprintId as string;
     if (!sprintId) {
-      const sprint = await prisma.sprint.findFirst({ orderBy: { startDate: 'desc' } });
+      const sprint = await prisma.sprint.findFirst();
       if (sprint) {
         sprintId = sprint.id;
       } else {
@@ -303,7 +293,7 @@ async function startServer() {
       if (apiKey && apiKey !== 'mock-key' && apiKey !== 'MY_GEMINI_API_KEY') {
         try {
           const response = await ai.models.generateContent({
-            model: 'gemini-1.5-flash',
+            model: 'gemini-3.1-flash-preview',
             contents: prompt,
             config: {
               responseMimeType: "application/json",
@@ -338,6 +328,21 @@ async function startServer() {
       res.status(500).json({ error: 'Failed to generate AI insights' });
     }
   });
+
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);

@@ -138,13 +138,18 @@ export default function App() {
 
   const fetchDashboardData = async (overrideSprintId?: string) => {
     if (!token) return;
-    const headers = { 'Authorization': `Bearer ${token}` };
+    const headers = { 
+      'Authorization': `Bearer ${token}`,
+      'Cache-Control': 'no-cache'
+    };
     setIsLoading(true);
     setError('');
     
     try {
       const targetSprintId = overrideSprintId || selectedSprintId;
-      const queryParam = targetSprintId ? `?sprintId=${targetSprintId}` : '';
+      const timestamp = Date.now();
+      const queryParam = targetSprintId ? `?sprintId=${targetSprintId}&t=${timestamp}` : `?t=${timestamp}`;
+      
       const [velRes, burnRes, cycleRes, leadRes, prodRes, aiRes] = await Promise.all([
         fetch(`${API_BASE}/api/metrics/velocity${queryParam}`, { headers }),
         fetch(`${API_BASE}/api/metrics/burndown${queryParam}`, { headers }),
