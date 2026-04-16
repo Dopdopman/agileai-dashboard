@@ -1,6 +1,5 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import path from 'path';
 import jwt from 'jsonwebtoken';
 import cors from 'cors';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -23,6 +22,11 @@ async function startServer() {
   }));
 
   app.use(express.json());
+
+  // --- ROOT ROUTE ---
+  app.get('/', (req, res) => {
+    res.send('AgileAI API Backend is running perfectly on Render! 🚀');
+  });
 
   // --- AUTHENTICATION SYSTEM (JWT) ---
   app.post('/api/auth/login', (req, res) => {
@@ -85,72 +89,69 @@ async function startServer() {
     }
 
     try {
-      // 1. Gọi GitHub API lấy dữ liệu thô
-      const githubService = new GitHubService(githubToken || process.env.GITHUB_TOKEN || '');
-      const normalizedIssues = await githubService.fetchIssues(repoOwner, repoName);
-
-      // 2. Tìm Sprint mới nhất đang chạy
+      // Lấy Sprint, Project và User mặc định từ DB
       const currentSprint = await prisma.sprint.findFirst({
         orderBy: { startDate: 'desc' }
       });
-
-      if (!currentSprint) {
-        res.status(400).json({ error: 'Chưa có Sprint nào trong hệ thống. Vui lòng tạo Sprint trước!' });
-        return;
-      }
-
-      // 3. Tìm Project và User mặc định
-      const defaultProject = await prisma.project.findFirst(); // Lấy project đầu tiên
+      const defaultProject = await prisma.project.findFirst();
       const defaultUser = await prisma.user.findFirst();
 
-      if (!defaultProject) {
-        res.status(400).json({ error: 'Chưa có Project nào trong hệ thống. Vui lòng chạy lệnh seed để tạo Project!' });
+      if (!currentSprint || !defaultProject) {
+        res.status(400).json({ error: 'Missing required Sprint or Project in database.' });
         return;
       }
 
-      // 4. Vòng lặp lưu dữ liệu thật vào PostgreSQL
+      // Fetch dữ liệu từ GitHub
+      const githubService = new GitHubService(githubToken || process.env.GITHUB_TOKEN || '');
+      const normalizedIssues = await githubService.fetchIssues(repoOwner, repoName);
+
       let syncedCount = 0;
+
+      // Lưu dữ liệu thật vào Database
       for (const issue of normalizedIssues) {
+        // Bọc thép dữ liệu: Xử lý ngày tháng an toàn
+        const createdAt = issue.createdAt || issue.created_at ? new Date(issue.createdAt || issue.created_at) : new Date();
+        const updatedAt = issue.updatedAt || issue.updated_at ? new Date(issue.updatedAt || issue.updated_at) : new Date();
+        const title = issue.title || 'Untitled Task';
         
-        const estimatedPoints = Math.floor(Math.random() * 5) + 1; 
+        // Trích xuất status
+        let status = 'To Do';
+        const issueState = (issue.state || '').toLowerCase();
+        if (issueState === 'closed') {
+          status = 'Done';
+        } else if (issue.assignee) {
+          status = 'In Progress';
+        }
 
-        // Rút trích an toàn (Hỗ trợ cả chuẩn gốc GitHub và chuẩn đã Normalize)
-        const safeTitle = issue.title || issue.name || `GitHub Task ${issue.id}`;
-        const safeState = issue.state || issue.status || 'open';
-        
-        // Xử lý ngày tháng an toàn, nếu không có thì lấy thời gian hiện tại
-        const safeCreatedAt = issue.createdAt ? new Date(issue.createdAt) : (issue.created_at ? new Date(issue.created_at) : new Date());
-        const safeUpdatedAt = issue.updatedAt ? new Date(issue.updatedAt) : (issue.updated_at ? new Date(issue.updated_at) : new Date());
+        // Random story points từ 1-5
+        const storyPoints = Math.floor(Math.random() * 5) + 1;
 
+        // Upsert vào bảng Task
         await prisma.task.upsert({
-          where: { 
-            githubId: issue.id.toString() 
-          },
+          where: { githubId: issue.id.toString() },
           update: {
-            status: (safeState === 'open' || safeState === 'In Progress') ? 'In Progress' : 'Done',
-            updatedAt: safeUpdatedAt,
+            title,
+            status,
+            updatedAt
           },
           create: {
             githubId: issue.id.toString(),
-            title: safeTitle,
-            status: (safeState === 'open' || safeState === 'To Do') ? 'To Do' : 'Done',
-            storyPoints: estimatedPoints,
+            title,
+            status,
+            storyPoints,
             sprintId: currentSprint.id,
             projectId: defaultProject.id,
-            assigneeId: defaultUser?.id,
-            createdAt: safeCreatedAt,
-            updatedAt: safeUpdatedAt,
+            assigneeId: defaultUser ? defaultUser.id : null,
+            createdAt,
+            updatedAt
           }
         });
         syncedCount++;
       }
-
-      // 5. Trả về kết quả cho Vercel Frontend
+      
       res.json({ 
-        message: `Successfully synced and saved ${syncedCount} real items to database.`,
-        sampleData: normalizedIssues.slice(0, 2) 
+        message: `Đã đồng bộ thành công ${syncedCount} tasks từ GitHub.`,
       });
-
     } catch (error: any) {
       console.error("Sync Error:", error);
       res.status(500).json({ error: error.message });
@@ -183,7 +184,7 @@ async function startServer() {
   const getSprintId = async (req: Request, res: Response) => {
     let sprintId = req.query.sprintId as string;
     if (!sprintId) {
-      const sprint = await prisma.sprint.findFirst();
+      const sprint = await prisma.sprint.findFirst({ orderBy: { startDate: 'desc' } });
       if (sprint) {
         sprintId = sprint.id;
       } else {
@@ -338,13 +339,8 @@ async function startServer() {
     }
   });
 
-  // --- DEFAULT ROUTE (HEALTH CHECK) ---
-  app.get('/', (req, res) => {
-    res.status(200).send('AgileAI API Backend is running perfectly on Render! 🚀');
-  });
-
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 
