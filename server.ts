@@ -85,16 +85,64 @@ async function startServer() {
     }
 
     try {
-      // Use the new Integration Module
+      // 1. Gọi GitHub API lấy dữ liệu thô
       const githubService = new GitHubService(githubToken || process.env.GITHUB_TOKEN || '');
       const normalizedIssues = await githubService.fetchIssues(repoOwner, repoName);
 
-      // In a real app, save normalizedIssues to PostgreSQL/MongoDB here.
-      
+      // 2. Tìm Sprint mới nhất đang chạy
+      const currentSprint = await prisma.sprint.findFirst({
+        orderBy: { startDate: 'desc' }
+      });
+
+      if (!currentSprint) {
+        res.status(400).json({ error: 'Chưa có Sprint nào trong hệ thống. Vui lòng tạo Sprint trước!' });
+        return;
+      }
+
+      // 3. Tìm Project và User mặc định
+      const defaultProject = await prisma.project.findFirst(); // Lấy project đầu tiên
+      const defaultUser = await prisma.user.findFirst();
+
+      if (!defaultProject) {
+        res.status(400).json({ error: 'Chưa có Project nào trong hệ thống. Vui lòng chạy lệnh seed để tạo Project!' });
+        return;
+      }
+
+      // 4. Vòng lặp lưu dữ liệu thật vào PostgreSQL
+      let syncedCount = 0;
+      for (const issue of normalizedIssues) {
+        
+        const estimatedPoints = Math.floor(Math.random() * 5) + 1; 
+
+        await prisma.task.upsert({
+          where: { 
+            githubId: issue.id.toString() 
+          },
+          update: {
+            status: issue.state === 'open' ? 'In Progress' : 'Done',
+            updatedAt: new Date(issue.updated_at),
+          },
+          create: {
+            githubId: issue.id.toString(),
+            title: issue.title,
+            status: issue.state === 'open' ? 'To Do' : 'Done',
+            storyPoints: estimatedPoints,
+            sprintId: currentSprint.id,
+            projectId: defaultProject.id, // <--- ĐÃ THÊM DÒNG NÀY ĐỂ TRỊ LỖI
+            assigneeId: defaultUser?.id,
+            createdAt: new Date(issue.created_at),
+            updatedAt: new Date(issue.updated_at),
+          }
+        });
+        syncedCount++;
+      }
+
+      // 5. Trả về kết quả cho Vercel Frontend
       res.json({ 
-        message: `Successfully synced ${normalizedIssues.length} items from GitHub.`,
+        message: `Successfully synced and saved ${syncedCount} real items to database.`,
         sampleData: normalizedIssues.slice(0, 2) 
       });
+
     } catch (error: any) {
       console.error("Sync Error:", error);
       res.status(500).json({ error: error.message });
