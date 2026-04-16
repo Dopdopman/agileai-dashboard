@@ -1,37 +1,50 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer,
-  LineChart, Line, PieChart, Pie, Cell
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  LineChart, Line, AreaChart, Area
 } from 'recharts';
 import { 
-  TrendingUp, Clock, Activity, Users, AlertTriangle, CheckCircle2, 
-  Download, Filter, RefreshCw, Github, BrainCircuit, Lock, X
+  LayoutDashboard, BrainCircuit, AlertTriangle, 
+  TrendingUp, Clock, Users, Activity, CheckCircle2,
+  LogOut, Lock, Github, RefreshCw, Filter, Download,
+  ArrowUpRight, ArrowDownRight, X
 } from 'lucide-react';
 
-// --- Shared UI Components ---
-const Card = ({ children, className = '', onClick }: { children: React.ReactNode, className?: string, onClick?: () => void }) => (
-  <div className={`bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden ${className}`} onClick={onClick}>
+// --- Components ---
+const Card = ({ children, className = '' }: { children: React.ReactNode, className?: string }) => (
+  <div className={`bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden ${className}`}>
     {children}
   </div>
 );
 
-const KPICard = ({ title, value, icon: Icon, status, onClick }: any) => (
-  <Card className="p-6 cursor-pointer hover:shadow-md transition-shadow" onClick={onClick}>
-    <div className="flex items-center justify-between">
-      <div>
-        <p className="text-sm font-medium text-gray-500 mb-1">{title}</p>
-        <h3 className="text-2xl font-bold text-gray-900">{value}</h3>
+const KPICard = ({ title, value, icon: Icon, trend, status = 'neutral', onClick }: any) => {
+  const statusColors = {
+    good: 'text-green-600 bg-green-50',
+    warning: 'text-amber-600 bg-amber-50',
+    critical: 'text-red-600 bg-red-50',
+    neutral: 'text-blue-600 bg-blue-50'
+  };
+
+  return (
+    <Card className={`p-6 ${onClick ? 'cursor-pointer hover:border-blue-300 transition-colors' : ''}`}>
+      <div className="flex items-center justify-between mb-4" onClick={onClick}>
+        <h3 className="text-sm font-medium text-gray-500">{title}</h3>
+        <div className={`p-2 rounded-lg ${statusColors[status as keyof typeof statusColors]}`}>
+          <Icon className="w-5 h-5" />
+        </div>
       </div>
-      <div className={`p-3 rounded-xl ${
-        status === 'good' ? 'bg-green-100 text-green-600' : 
-        status === 'warning' ? 'bg-amber-100 text-amber-600' : 
-        'bg-red-100 text-red-600'
-      }`}>
-        <Icon className="w-6 h-6" />
+      <div className="flex items-baseline gap-2" onClick={onClick}>
+        <span className="text-3xl font-bold text-gray-900">{value}</span>
+        {trend && (
+          <span className={`flex items-center text-sm font-medium ${trend > 0 ? 'text-green-600' : trend < 0 ? 'text-red-600' : 'text-gray-500'}`}>
+            {trend > 0 ? <ArrowUpRight className="w-4 h-4 mr-1" /> : trend < 0 ? <ArrowDownRight className="w-4 h-4 mr-1" /> : null}
+            {Math.abs(trend)}%
+          </span>
+        )}
       </div>
-    </div>
-  </Card>
-);
+    </Card>
+  );
+};
 
 const Modal = ({ isOpen, onClose, title, children }: any) => {
   if (!isOpen) return null;
@@ -52,10 +65,10 @@ const Modal = ({ isOpen, onClose, title, children }: any) => {
   );
 };
 
-// --- Main Application ---
+// --- Main App ---
 export default function App() {
   // Auth State
-  const [token, setToken] = useState(localStorage.getItem('jwt_token') || '');
+  const [token, setToken] = useState<string | null>(localStorage.getItem('jwt_token'));
   const [user, setUser] = useState<any>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -67,6 +80,9 @@ export default function App() {
   const [atRiskIssues, setAtRiskIssues] = useState<any[]>([]);
   const [burndownData, setBurndownData] = useState<any[]>([]);
   const [productivityData, setProductivityData] = useState<any[]>([]);
+  const [trends, setTrends] = useState<any[]>([]);
+  const [ranking, setRanking] = useState<any[]>([]);
+  const [compare, setCompare] = useState<any[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState('');
   const [isLoading, setIsLoading] = useState(true);
@@ -106,8 +122,14 @@ export default function App() {
         setLoginError(data.error);
       }
     } catch (err) {
-      setLoginError('Failed to connect to server.');
+      setLoginError('Login failed. Server unreachable.');
     }
+  };
+
+  const handleLogout = () => {
+    setToken(null);
+    setUser(null);
+    localStorage.removeItem('jwt_token');
   };
 
   // --- Data Fetching ---
@@ -130,11 +152,11 @@ export default function App() {
   };
 
   const fetchDashboardData = async () => {
+    if (!token) return;
+    const headers = { 'Authorization': `Bearer ${token}` };
     setIsLoading(true);
     setError('');
     
-    const headers = { 'Authorization': `Bearer ${token}` };
-
     try {
       const queryParam = selectedSprintId ? `?sprintId=${selectedSprintId}` : '';
       const [velRes, burnRes, cycleRes, leadRes, prodRes, aiRes] = await Promise.all([
@@ -147,45 +169,50 @@ export default function App() {
       ]);
 
       if (velRes.status === 401 || velRes.status === 403) {
-        setToken('');
-        localStorage.removeItem('jwt_token');
+        handleLogout();
         return;
       }
 
-      if (!velRes.ok || !burnRes.ok || !cycleRes.ok || !leadRes.ok || !prodRes.ok || !aiRes.ok) {
-        throw new Error('Failed to fetch one or more metrics');
-      }
+      const velData = await velRes.json();
+      const burnData = await burnRes.json();
+      const cycleData = await cycleRes.json();
+      const leadData = await leadRes.json();
+      const prodData = await prodRes.json();
+      const aiData = await aiRes.json();
 
-      const [velData, burnData, cycleData, leadData, prodData, aiData] = await Promise.all([
-        velRes.json(), burnRes.json(), cycleRes.json(), leadRes.json(), prodRes.json(), aiRes.json()
-      ]);
+      // Calculate total productivity points
+      const totalProductivity = Array.isArray(prodData) 
+        ? prodData.reduce((acc: number, curr: any) => acc + (curr.totalStoryPoints || 0), 0)
+        : 0;
 
       setMetrics({
-        velocity: velData.velocity,
-        cycleTime: cycleData.cycleTime,
-        leadTime: leadData.leadTime,
-        productivity: prodData.reduce((acc: number, curr: any) => acc + curr.completedPoints, 0),
+        velocity: velData.velocity || 0,
+        cycleTime: cycleData.cycleTime || 0,
+        leadTime: leadData.leadTime || 0,
+        productivity: totalProductivity,
         healthStatus: aiData.riskPercentage > 60 ? 'At Risk' : 'Healthy'
       });
-
-      setBurndownData(burnData);
-      setProductivityData(prodData);
+      
+      // Fix: Lấy mảng burndownChart từ object trả về
+      setBurndownData(burnData.burndownChart || []);
+      setProductivityData(Array.isArray(prodData) ? prodData : []);
       setAiInsights(aiData);
       
-      // Mock at-risk issues for now (can be replaced with real data later)
-      setAtRiskIssues([
-        { id: 'TASK-102', title: 'Implement OAuth2', status: 'In Progress', daysInStatus: 5, assignee: 'Charlie Dev', riskLevel: 'High' },
-        { id: 'TASK-105', title: 'Database Migration', status: 'To Do', daysInStatus: 3, assignee: 'Unassigned', riskLevel: 'Medium' }
-      ]);
-
-    } catch (err: any) {
-      setError(err.message || 'Failed to load dashboard data.');
+      // Clear out the other states since we removed the mock endpoints
+      setTrends([]);
+      setRanking([]);
+      setCompare([]);
+      setAtRiskIssues([]);
+    } catch (error) {
+      console.error("Failed to fetch dashboard data", error);
+      setError('Failed to load dashboard data. Please try again later.');
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleDrilldown = async (type: string, title: string) => {
+    if (!token) return;
     setDrilldownTitle(title);
     setIsDrilldownOpen(true);
     setDrilldownData(null); // Loading state
@@ -476,32 +503,31 @@ export default function App() {
               <thead>
                 <tr className="border-b border-gray-200 text-sm text-gray-500">
                   <th className="pb-3 font-medium">Issue</th>
+                  <th className="pb-3 font-medium">Title</th>
+                  <th className="pb-3 font-medium">Time in Progress</th>
                   <th className="pb-3 font-medium">Status</th>
-                  <th className="pb-3 font-medium">Days in Status</th>
-                  <th className="pb-3 font-medium">Assignee</th>
-                  <th className="pb-3 font-medium">Risk Level</th>
                 </tr>
               </thead>
               <tbody className="text-sm">
-                {atRiskIssues.map((issue, i) => (
-                  <tr key={i} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
-                    <td className="py-4 font-medium text-blue-600 cursor-pointer hover:underline">{issue.id}: {issue.title}</td>
+                {atRiskIssues.length > 0 ? atRiskIssues.map((issue: any) => (
+                  <tr key={issue.id} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                    <td className="py-4 font-medium text-blue-600">{issue.id}</td>
+                    <td className="py-4 text-gray-900">{issue.title}</td>
+                    <td className="py-4 text-amber-600 font-medium">{issue.timeInProgress}</td>
                     <td className="py-4">
-                      <span className="px-2.5 py-1 bg-gray-100 text-gray-700 rounded-full text-xs font-medium">
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                        ${issue.status === 'Blocked' ? 'bg-red-100 text-red-800' : 
+                          issue.status === 'Review' ? 'bg-blue-100 text-blue-800' : 
+                          'bg-amber-100 text-amber-800'}`}>
                         {issue.status}
                       </span>
                     </td>
-                    <td className="py-4 text-gray-600">{issue.daysInStatus} days</td>
-                    <td className="py-4 text-gray-600">{issue.assignee}</td>
-                    <td className="py-4">
-                      <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                        issue.riskLevel === 'High' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
-                      }`}>
-                        {issue.riskLevel}
-                      </span>
-                    </td>
                   </tr>
-                ))}
+                )) : (
+                  <tr>
+                    <td colSpan={4} className="py-8 text-center text-gray-500">No at-risk issues found.</td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -509,38 +535,84 @@ export default function App() {
 
         {/* Charts Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <Card className="p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-6">Sprint Burndown</h3>
+          {/* Sprint Burndown Chart */}
+          <Card className="p-6 lg:col-span-2">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-lg font-semibold text-gray-900">Sprint Burndown</h3>
+            </div>
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={burndownData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-                  <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} dy={10} />
+                <LineChart data={burndownData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                  <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
                   <YAxis axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
-                  <RechartsTooltip 
-                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                  <Tooltip 
+                    contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}}
+                    content={({ active, payload, label }) => {
+                      if (active && payload && payload.length) {
+                        const data = payload[0].payload;
+                        return (
+                          <div className="bg-white p-3 rounded-lg shadow-lg border border-gray-100">
+                            <p className="font-semibold text-gray-900 mb-2">{label}</p>
+                            <div className="space-y-1 text-sm">
+                              <p className="text-blue-600">
+                                <span className="inline-block w-3 h-3 rounded-full bg-blue-500 mr-2"></span>
+                                Remaining: <span className="font-medium">{data.remainingPoints} pts</span>
+                              </p>
+                              <p className="text-gray-500">
+                                <span className="inline-block w-3 h-3 rounded-full bg-gray-400 mr-2"></span>
+                                Burned: <span className="font-medium text-gray-900">{data.burnedPoints} pts</span>
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      }
+                      return null;
+                    }}
                   />
-                  <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                  <Line type="monotone" dataKey="ideal" stroke="#9ca3af" strokeWidth={2} strokeDasharray="5 5" dot={false} name="Ideal Burndown" />
-                  <Line type="monotone" dataKey="actual" stroke="#3b82f6" strokeWidth={3} dot={{r: 4, strokeWidth: 2}} activeDot={{r: 6}} name="Actual Remaining" />
+                  <Legend />
+                  <Line 
+                    type="monotone" 
+                    dataKey="remainingPoints" 
+                    stroke="#3b82f6" 
+                    strokeWidth={3} 
+                    dot={{ r: 4, fill: "#3b82f6", stroke: "#fff", strokeWidth: 2 }}
+                    activeDot={{ r: 6 }}
+                    name="Remaining Points" 
+                  />
                 </LineChart>
               </ResponsiveContainer>
             </div>
           </Card>
 
+          {/* Velocity Chart */}
+          <Card className="p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-6">Sprint Velocity</h3>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={[{ name: 'Current Sprint', velocity: metrics.velocity }]}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
+                  <YAxis axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
+                  <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
+                  <Bar dataKey="velocity" fill="#3b82f6" radius={[4, 4, 0, 0]} name="Velocity (pts)" barSize={60} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </Card>
+
+          {/* Team Productivity */}
           <Card className="p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-6">Team Productivity</h3>
-            <div className="h-80">
+            <div className="h-72">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={productivityData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-                  <XAxis dataKey="userName" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
-                  <RechartsTooltip 
-                    cursor={{fill: '#f3f4f6'}}
-                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                  />
-                  <Bar dataKey="completedPoints" fill="#8b5cf6" radius={[4, 4, 0, 0]} name="Completed Points" barSize={40} />
+                <BarChart data={productivityData} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e5e7eb" />
+                  <XAxis type="number" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
+                  <YAxis dataKey="userName" type="category" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} width={100} />
+                  <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
+                  <Legend />
+                  <Bar dataKey="totalStoryPoints" fill="#10b981" radius={[0, 4, 4, 0]} name="Story Points" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -573,7 +645,7 @@ export default function App() {
                 <span className="text-xs px-2 py-1 bg-blue-50 text-blue-700 rounded-md font-medium">{user?.role}</span>
               </div>
               <button 
-                onClick={() => { setToken(''); localStorage.removeItem('jwt_token'); }}
+                onClick={handleLogout}
                 className="text-sm text-gray-500 hover:text-gray-700 font-medium"
               >
                 Logout
