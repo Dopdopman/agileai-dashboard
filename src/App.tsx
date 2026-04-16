@@ -46,43 +46,26 @@ const KPICard = ({ title, value, icon: Icon, trend, status = 'neutral', onClick 
   );
 };
 
-const Modal = ({ isOpen, onClose, title, children }: any) => {
-  if (!isOpen) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden shadow-2xl flex flex-col">
-        <div className="flex items-center justify-between p-6 border-b border-gray-100">
-          <h2 className="text-xl font-bold text-gray-900">{title}</h2>
-          <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <div className="p-6 overflow-y-auto">
-          {children}
-        </div>
-      </div>
-    </div>
-  );
-};
-
 // --- Main App ---
 export default function App() {
-  // Auth State
   const [token, setToken] = useState<string | null>(localStorage.getItem('jwt_token'));
   const [user, setUser] = useState<any>(null);
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'ai-model'>('dashboard');
+  
+  // Login State
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('password');
   const [loginError, setLoginError] = useState('');
 
   // Dashboard State
   const [metrics, setMetrics] = useState<any>(null);
+  const [trends, setTrends] = useState<any[]>([]);
+  const [ranking, setRanking] = useState<any[]>([]);
+  const [compare, setCompare] = useState<any[]>([]);
   const [aiInsights, setAiInsights] = useState<any>(null);
   const [atRiskIssues, setAtRiskIssues] = useState<any[]>([]);
   const [burndownData, setBurndownData] = useState<any[]>([]);
   const [productivityData, setProductivityData] = useState<any[]>([]);
-  const [trends, setTrends] = useState<any[]>([]);
-  const [ranking, setRanking] = useState<any[]>([]);
-  const [compare, setCompare] = useState<any[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState('');
   const [isLoading, setIsLoading] = useState(true);
@@ -193,7 +176,6 @@ export default function App() {
         healthStatus: aiData.riskPercentage > 60 ? 'At Risk' : 'Healthy'
       });
       
-      // Fix: Lấy mảng burndownChart từ object trả về
       setBurndownData(burnData.burndownChart || []);
       setProductivityData(Array.isArray(prodData) ? prodData : []);
       setAiInsights(aiData);
@@ -279,7 +261,8 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         setSyncMessage(data.message || 'Đồng bộ thành công!');
-        fetchSprints();
+        await fetchSprints();
+        await fetchDashboardData();
       } else {
         setSyncMessage(`Lỗi: ${data.error}`);
       }
@@ -435,8 +418,8 @@ export default function App() {
               className="text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500 outline-none p-2"
             >
               <option>All Projects</option>
-              <option>Frontend Redesign</option>
-              <option>API Migration</option>
+              <option>Project Alpha</option>
+              <option>Project Beta</option>
             </select>
             <select 
               value={timeRange} 
@@ -444,11 +427,17 @@ export default function App() {
               className="text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500 outline-none p-2"
             >
               <option value="7d">Last 7 Days</option>
-              <option value="14d">Last 14 Days</option>
               <option value="30d">Last 30 Days</option>
+              <option value="custom">Custom Range</option>
             </select>
           </div>
         </div>
+
+        {syncMessage && (
+          <div className="p-4 bg-blue-50 text-blue-700 rounded-lg border border-blue-200 text-sm">
+            {syncMessage}
+          </div>
+        )}
 
         {/* KPIs */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
@@ -501,14 +490,14 @@ export default function App() {
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="border-b border-gray-200 text-sm text-gray-500">
-                  <th className="pb-3 font-medium">Issue</th>
-                  <th className="pb-3 font-medium">Title</th>
-                  <th className="pb-3 font-medium">Time in Progress</th>
-                  <th className="pb-3 font-medium">Status</th>
+                <tr className="border-b border-gray-200">
+                  <th className="pb-3 text-sm font-semibold text-gray-500">Issue ID</th>
+                  <th className="pb-3 text-sm font-semibold text-gray-500">Title</th>
+                  <th className="pb-3 text-sm font-semibold text-gray-500">Time in Progress</th>
+                  <th className="pb-3 text-sm font-semibold text-gray-500">Status</th>
                 </tr>
               </thead>
-              <tbody className="text-sm">
+              <tbody>
                 {atRiskIssues.length > 0 ? atRiskIssues.map((issue: any) => (
                   <tr key={issue.id} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
                     <td className="py-4 font-medium text-blue-600">{issue.id}</td>
@@ -622,67 +611,170 @@ export default function App() {
     );
   };
 
+  const renderAIModel = () => {
+    const pythonCode = `
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingRegressor
+import google.generativeai as genai
+import os
+
+class AgileAIModel:
+    def __init__(self):
+        # ML Models
+        self.risk_classifier = RandomForestClassifier(n_estimators=100, random_state=42)
+        self.delay_regressor = GradientBoostingRegressor(n_estimators=100, random_state=42)
+        
+        # LLM Setup
+        genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+        self.llm_model = genai.GenerativeModel('gemini-3.1-flash-preview')
+        
+    def predict_and_analyze(self, sprint_data):
+        """
+        Combined ML + LLM approach:
+        1. ML predicts risk probability and delay days.
+        2. LLM generates root cause analysis and recommendations based on ML output.
+        """
+        df = pd.DataFrame([sprint_data])
+        features = df[['velocity_trend', 'backlog_size', 'issue_aging', 'cycle_time_avg']]
+        
+        # 1. ML Predictions
+        risk_prob = self.risk_classifier.predict_proba(features)[0][1]
+        predicted_delay = self.delay_regressor.predict(features)[0]
+        
+        # 2. LLM Root Cause Analysis
+        prompt = f"""
+        Analyze these Agile metrics and ML predictions:
+        - Velocity Trend: {sprint_data['velocity_trend']}
+        - Cycle Time Avg: {sprint_data['cycle_time_avg']} days
+        - ML Risk Probability: {risk_prob * 100:.1f}%
+        - ML Predicted Delay: {predicted_delay:.1f} days
+        
+        Provide a 1-sentence root cause analysis and 3 actionable recommendations.
+        """
+        
+        response = self.llm_model.generate_content(prompt)
+        
+        return {
+            "ml_risk_probability": float(risk_prob),
+            "ml_predicted_delay": float(predicted_delay),
+            "llm_insights": response.text
+        }
+    `;
+
+    return (
+      <Card className="p-8">
+        <div className="mb-6">
+          <h2 className="text-2xl font-bold text-gray-900">AI Module (ML + LLM Combined)</h2>
+          <p className="text-gray-600 mt-2">
+            This Python snippet demonstrates how the separate AI microservice combines <code>scikit-learn</code> for quantitative predictions (classification & regression) with the <code>Gemini API</code> for qualitative root cause analysis and actionable recommendations.
+          </p>
+        </div>
+        <div className="bg-gray-900 rounded-xl p-6 overflow-x-auto">
+          <pre className="text-gray-100 text-sm font-mono leading-relaxed">
+            <code>{pythonCode}</code>
+          </pre>
+        </div>
+      </Card>
+    );
+  };
+
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans">
-      {/* Top Navigation */}
-      <nav className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-                <Activity className="w-5 h-5 text-white" />
-              </div>
-              <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">
-                AgileAI
-              </span>
-            </div>
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-sm font-medium text-gray-600">
-                  {user?.name?.charAt(0) || 'U'}
-                </div>
-                <span className="text-sm font-medium text-gray-700 hidden sm:block">{user?.name}</span>
-                <span className="text-xs px-2 py-1 bg-blue-50 text-blue-700 rounded-md font-medium">{user?.role}</span>
-              </div>
-              <button 
-                onClick={handleLogout}
-                className="text-sm text-gray-500 hover:text-gray-700 font-medium"
-              >
-                Logout
-              </button>
-            </div>
+    <div className="min-h-screen bg-gray-50 flex">
+      {/* Sidebar */}
+      <aside className="w-64 bg-white border-r border-gray-200 flex flex-col shrink-0">
+        <div className="p-6 border-b border-gray-200">
+          <div className="flex items-center gap-3 text-blue-600">
+            <Activity className="w-8 h-8" />
+            <span className="text-xl font-bold text-gray-900 tracking-tight">AgileAI</span>
           </div>
         </div>
-      </nav>
+        <nav className="flex-1 p-4 space-y-1">
+          <button
+            onClick={() => setActiveTab('dashboard')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors ${
+              activeTab === 'dashboard' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+            }`}
+          >
+            <LayoutDashboard className="w-5 h-5" />
+            Dashboard
+          </button>
+          <button
+            onClick={() => setActiveTab('ai-model')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors ${
+              activeTab === 'ai-model' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+            }`}
+          >
+            <BrainCircuit className="w-5 h-5" />
+            AI Model Code
+          </button>
+        </nav>
+        <div className="p-4 border-t border-gray-200">
+          <div className="flex items-center gap-3 px-4 py-3 mb-2">
+            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-sm">
+              {user?.name?.charAt(0) || 'U'}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-gray-900 truncate">{user?.name || 'User'}</p>
+              <p className="text-xs text-gray-500 truncate">{user?.role || 'Role'}</p>
+            </div>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="w-full flex items-center gap-3 px-4 py-2 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+            Sign Out
+          </button>
+        </div>
+      </aside>
 
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {renderDashboard()}
-      </main>
+      <main className="flex-1 overflow-y-auto w-full relative">
+        <div className="max-w-[1600px] mx-auto p-4 sm:p-6 lg:p-8">
+          {activeTab === 'dashboard' && renderDashboard()}
+          {activeTab === 'ai-model' && renderAIModel()}
+        </div>
 
-      {/* Drilldown Modal */}
-      <Modal isOpen={isDrilldownOpen} onClose={() => setIsDrilldownOpen(false)} title={drilldownTitle}>
-        {!drilldownData ? (
-          <div className="flex justify-center p-8">
-            <RefreshCw className="w-8 h-8 text-blue-500 animate-spin" />
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {drilldownData.length === 0 ? (
-              <p className="text-gray-500 text-center py-4">No detailed data available.</p>
-            ) : (
-              <ul className="divide-y divide-gray-100">
-                {drilldownData.map((item, idx) => (
-                  <li key={idx} className="py-3 flex justify-between items-center">
-                    <span className="font-medium text-gray-900">{item.title || item.name || `Item ${idx + 1}`}</span>
-                    <span className="text-gray-500 text-sm">{JSON.stringify(item.value || item.status)}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
+        {/* Drilldown Modal */}
+        {isDrilldownOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/50 backdrop-blur-sm">
+            <Card className="w-full max-w-2xl max-h-[80vh] flex flex-col shadow-xl">
+              <div className="flex items-center justify-between p-6 border-b border-gray-100">
+                <h3 className="text-lg font-semibold text-gray-900">{drilldownTitle}</h3>
+                <button onClick={() => setIsDrilldownOpen(false)} className="text-gray-400 hover:text-gray-600">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-6 overflow-y-auto flex-1">
+                {!drilldownData ? (
+                  <div className="flex justify-center items-center h-32">
+                    <RefreshCw className="w-6 h-6 text-blue-500 animate-spin" />
+                  </div>
+                ) : drilldownData.length === 0 ? (
+                  <div className="text-center text-gray-500 py-8">No detailed data available.</div>
+                ) : (
+                  <div className="space-y-4">
+                    {drilldownData.map((item: any, i: number) => (
+                      <div key={i} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg border border-gray-100">
+                        <div>
+                          <div className="font-medium text-gray-900">{item.id} - {item.title}</div>
+                          <div className="text-sm text-gray-500 mt-1">Status: {item.status}</div>
+                        </div>
+                        <div className="text-right">
+                          {item.points && <div className="font-bold text-blue-600">{item.points} pts</div>}
+                          {item.cycleTime && <div className="font-bold text-amber-600">{item.cycleTime}</div>}
+                          {item.completedAt && <div className="text-xs text-gray-500 mt-1">{item.completedAt}</div>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>git
+            </Card>
           </div>
         )}
-      </Modal>
+      </main>
     </div>
   );
 }
