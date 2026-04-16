@@ -128,20 +128,23 @@ export default function App() {
         if (data.length > 0 && !selectedSprintId) {
           setSelectedSprintId(data[0].id);
         }
+        return data;
       }
     } catch (err) {
       console.error("Failed to fetch sprints", err);
     }
+    return null;
   };
 
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = async (overrideSprintId?: string) => {
     if (!token) return;
     const headers = { 'Authorization': `Bearer ${token}` };
     setIsLoading(true);
     setError('');
     
     try {
-      const queryParam = selectedSprintId ? `?sprintId=${selectedSprintId}` : '';
+      const targetSprintId = overrideSprintId || selectedSprintId;
+      const queryParam = targetSprintId ? `?sprintId=${targetSprintId}` : '';
       const [velRes, burnRes, cycleRes, leadRes, prodRes, aiRes] = await Promise.all([
         fetch(`${API_BASE}/api/metrics/velocity${queryParam}`, { headers }),
         fetch(`${API_BASE}/api/metrics/burndown${queryParam}`, { headers }),
@@ -261,8 +264,14 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         setSyncMessage(data.message || 'Đồng bộ thành công!');
-        await fetchSprints();
-        await fetchDashboardData();
+        const newSprints = await fetchSprints();
+        if (newSprints && newSprints.length > 0) {
+          const latestSprintId = newSprints[0].id;
+          setSelectedSprintId(latestSprintId);
+          await fetchDashboardData(latestSprintId);
+        } else {
+          await fetchDashboardData();
+        }
       } else {
         setSyncMessage(`Lỗi: ${data.error}`);
       }
@@ -340,7 +349,7 @@ export default function App() {
           </div>
           <h2 className="text-xl font-bold text-gray-900 mb-2">Something went wrong</h2>
           <p className="text-gray-500 mb-4">{error}</p>
-          <button onClick={fetchDashboardData} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+          <button onClick={() => fetchDashboardData()} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
             Try Again
           </button>
         </div>
@@ -770,7 +779,7 @@ class AgileAIModel:
                     ))}
                   </div>
                 )}
-              </div>git
+              </div>
             </Card>
           </div>
         )}
