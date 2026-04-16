@@ -114,24 +114,32 @@ async function startServer() {
         
         const estimatedPoints = Math.floor(Math.random() * 5) + 1; 
 
+        // Rút trích an toàn (Hỗ trợ cả chuẩn gốc GitHub và chuẩn đã Normalize)
+        const safeTitle = issue.title || issue.name || `GitHub Task ${issue.id}`;
+        const safeState = issue.state || issue.status || 'open';
+        
+        // Xử lý ngày tháng an toàn, nếu không có thì lấy thời gian hiện tại
+        const safeCreatedAt = issue.createdAt ? new Date(issue.createdAt) : (issue.created_at ? new Date(issue.created_at) : new Date());
+        const safeUpdatedAt = issue.updatedAt ? new Date(issue.updatedAt) : (issue.updated_at ? new Date(issue.updated_at) : new Date());
+
         await prisma.task.upsert({
           where: { 
             githubId: issue.id.toString() 
           },
           update: {
-            status: issue.state === 'open' ? 'In Progress' : 'Done',
-            updatedAt: new Date(issue.updated_at),
+            status: (safeState === 'open' || safeState === 'In Progress') ? 'In Progress' : 'Done',
+            updatedAt: safeUpdatedAt,
           },
           create: {
             githubId: issue.id.toString(),
-            title: issue.title,
-            status: issue.state === 'open' ? 'To Do' : 'Done',
+            title: safeTitle,
+            status: (safeState === 'open' || safeState === 'To Do') ? 'To Do' : 'Done',
             storyPoints: estimatedPoints,
             sprintId: currentSprint.id,
-            projectId: defaultProject.id, // <--- ĐÃ THÊM DÒNG NÀY ĐỂ TRỊ LỖI
+            projectId: defaultProject.id,
             assigneeId: defaultUser?.id,
-            createdAt: new Date(issue.created_at),
-            updatedAt: new Date(issue.updated_at),
+            createdAt: safeCreatedAt,
+            updatedAt: safeUpdatedAt,
           }
         });
         syncedCount++;
