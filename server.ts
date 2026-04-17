@@ -166,6 +166,11 @@ async function startServer() {
       // 5. Quét mảng normalizedIssues phân bổ vào Tasks
       let syncedCount = 0;
       for (const issue of normalizedIssues) {
+        // KIỂM TRA PHIÊN BẢN CỦA githubService.ts TRÁNH LỖI PRISMA
+        if (issue.title === undefined || issue.createdAt === undefined) {
+          throw new Error("Dữ liệu từ GitHub bị thiếu 'title' hoặc 'createdAt'. Vui lòng đảm bảo bạn đã cập nhật và deploy file `src/services/githubService.ts` mới nhất.");
+        }
+
         // Map status (2)
         let status = 'To Do';
         if (issue.state === 'closed') {
