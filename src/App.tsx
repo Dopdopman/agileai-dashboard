@@ -404,7 +404,8 @@ export default function App() {
           </div>
 
           {syncMessage && (
-            <div className={`p-3 rounded-lg text-sm font-medium ${syncMessage.includes('Lỗi') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+            <div className={`p-4 rounded-xl border text-sm font-medium flex items-center gap-2 ${syncMessage.includes('Lỗi') ? 'bg-red-50 text-red-700 border-red-200' : 'bg-green-50 text-green-700 border-green-200'}`}>
+              {syncMessage.includes('Lỗi') ? <AlertTriangle className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}
               {syncMessage}
             </div>
           )}
@@ -446,12 +447,6 @@ export default function App() {
             </select>
           </div>
         </div>
-
-        {syncMessage && (
-          <div className="p-4 bg-blue-50 text-blue-700 rounded-lg border border-blue-200 text-sm">
-            {syncMessage}
-          </div>
-        )}
 
         {/* KPIs */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">

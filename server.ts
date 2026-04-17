@@ -98,6 +98,8 @@ async function startServer() {
       const githubService = new GitHubService(githubToken || process.env.GITHUB_TOKEN || '');
       const normalizedIssues = await githubService.fetchIssues(repoOwner, repoName);
 
+      console.log("FIRST ISSUE FROM githubService:", normalizedIssues[0]);
+
       if (normalizedIssues.length === 0) {
         res.json({ message: 'Không tìm thấy issue nào từ GitHub.', sampleData: [] });
         return;
@@ -186,10 +188,16 @@ async function startServer() {
           targetSprint = generatedSprints[generatedSprints.length - 1];
         }
 
+        // Map title (fallback string)
+        let issueTitle = issue.title;
+        if (!issueTitle || typeof issueTitle !== 'string') {
+          issueTitle = `GitHub Task #${issue.id}`;
+        }
+
         await prisma.task.create({
           data: {
             id: issue.id,
-            title: issue.title,
+            title: issueTitle,
             status: status,
             storyPoints: storyPoints,
             createdAt: issueCreatedAt,
