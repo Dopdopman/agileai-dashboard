@@ -1,5 +1,6 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
+import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import jwt from 'jsonwebtoken';
 import cors from 'cors';
@@ -85,12 +86,11 @@ async function startServer() {
     }
 
     try {
-      const currentSprint = await prisma.sprint.findFirst({ orderBy: { startDate: 'desc' } });
       const defaultProject = await prisma.project.findFirst();
       const defaultUser = await prisma.user.findFirst();
 
-      if (!currentSprint || !defaultProject || !defaultUser) {
-        res.status(400).json({ error: 'Missing default Sprint, Project, or User in database.' });
+      if (!defaultProject || !defaultUser) {
+        res.status(400).json({ error: 'Missing default Project or User in database.' });
         return;
       }
 
@@ -98,51 +98,115 @@ async function startServer() {
       const githubService = new GitHubService(githubToken || process.env.GITHUB_TOKEN || '');
       const normalizedIssues = await githubService.fetchIssues(repoOwner, repoName);
 
-      // XÓA SẠCH toàn bộ tasks cũ của Sprint hiện tại
-      await prisma.task.deleteMany({ where: { sprintId: currentSprint.id } });
+      if (normalizedIssues.length === 0) {
+        res.json({ message: 'Không tìm thấy issue nào từ GitHub.', sampleData: [] });
+        return;
+      }
 
+      // 1. Xóa sạch dữ liệu Tasks và Sprints CŨ của defaultProject
+      await prisma.task.deleteMany({ where: { projectId: defaultProject.id } });
+      await prisma.sprint.deleteMany({ where: { projectId: defaultProject.id } });
+
+      // 3. Tìm minDate và maxDate
+      let minDate = new Date(normalizedIssues[0].createdAt || new Date());
+      let maxDate = new Date(normalizedIssues[0].createdAt || new Date());
+
+      for (const issue of normalizedIssues) {
+        const createdAt = new Date(issue.createdAt || new Date());
+        if (createdAt < minDate) minDate = createdAt;
+        if (createdAt > maxDate) maxDate = createdAt;
+        
+        if (issue.closedAt) {
+          const closedAt = new Date(issue.closedAt);
+          if (closedAt > maxDate) maxDate = closedAt;
+        }
+      }
+
+      // Đảm bảo maxDate > minDate ít nhất 1 chút để vòng lặp while hoạt động hiệu quả
+      if (maxDate.getTime() === minDate.getTime()) {
+        maxDate = new Date(minDate.getTime() + 14 * 24 * 60 * 60 * 1000);
+      }
+
+      // 4. Vòng lặp while nhảy 14 ngày tạo Sprints
+      const generatedSprints = [];
+      let currentStartDate = new Date(minDate);
+      let sprintIndex = 1;
+
+      while (currentStartDate <= maxDate) {
+        const currentEndDate = new Date(currentStartDate.getTime() + 14 * 24 * 60 * 60 * 1000);
+        
+        const sprint = await prisma.sprint.create({
+          data: {
+            name: `Sprint ${sprintIndex}`,
+            startDate: currentStartDate,
+            endDate: currentEndDate,
+            projectId: defaultProject.id
+          }
+        });
+        
+        generatedSprints.push(sprint);
+        
+        currentStartDate = currentEndDate; 
+        sprintIndex++;
+      }
+
+      // Cứu cánh nếu array bị rỗng vì khoảng date quá bé
+      if (generatedSprints.length === 0) {
+        const sprint = await prisma.sprint.create({
+          data: {
+            name: 'Sprint 1',
+            startDate: minDate,
+            endDate: new Date(minDate.getTime() + 14 * 24 * 60 * 60 * 1000),
+            projectId: defaultProject.id
+          }
+        });
+        generatedSprints.push(sprint);
+      }
+
+      // 5. Quét mảng normalizedIssues phân bổ vào Tasks
       let syncedCount = 0;
       for (const issue of normalizedIssues) {
-        // 1. BỌC THÉP TITLE: Nếu GitHub không có title, tự động gán tên mặc định
-        const safeTitle = issue.title || `GitHub Task #${issue.id}`;
-
-        // 2. Map status
+        // Map status (2)
         let status = 'To Do';
-        if (issue.state === 'closed') status = 'Done';
-        else if (issue.assignees && issue.assignees.length > 0) status = 'In Progress';
+        if (issue.state === 'closed') {
+          status = 'Done';
+        } else if (issue.assignees && issue.assignees.length > 0) {
+          status = 'In Progress';
+        }
 
-        // 3. Map story points (random 1-5 if not available)
+        // Map story points (random 1-5 if not available)
         const storyPoints = issue.storyPoints || Math.floor(Math.random() * 5) + 1;
 
-        // 4. Upsert an toàn
-        await prisma.task.upsert({
-          where: { id: issue.id.toString() }, // Đảm bảo ID luôn là String
-          update: {
-            title: safeTitle, // Dùng safeTitle thay vì issue.title
+        const issueCreatedAt = new Date(issue.createdAt || new Date());
+        
+        // Tìm sprint có khoảng startDate và endDate tương ứng với issue createdAt
+        let targetSprint = generatedSprints.find(s => issueCreatedAt >= s.startDate && issueCreatedAt < s.endDate);
+        if (!targetSprint) {
+          // Fallback gán cho Sprint cuối cùng nếu có sai sót vượt range
+          targetSprint = generatedSprints[generatedSprints.length - 1];
+        }
+
+        await prisma.task.create({
+          data: {
+            id: issue.id,
+            title: issue.title,
             status: status,
             storyPoints: storyPoints,
-            updatedAt: new Date(issue.updatedAt || new Date()),
-            completedAt: issue.closedAt ? new Date(issue.closedAt) : null,
-          },
-          create: {
-            id: issue.id.toString(),
-            title: safeTitle, // Dùng safeTitle
-            status: status,
-            storyPoints: storyPoints,
-            createdAt: new Date(issue.createdAt || new Date()),
-            updatedAt: new Date(issue.updatedAt || new Date()),
-            startedAt: status !== 'To Do' ? new Date(issue.createdAt || new Date()) : null,
+            createdAt: issueCreatedAt,
+            updatedAt: issue.updatedAt ? new Date(issue.updatedAt) : new Date(),
+            startedAt: status !== 'To Do' ? issueCreatedAt : null,
             completedAt: issue.closedAt ? new Date(issue.closedAt) : null,
             projectId: defaultProject.id,
-            sprintId: currentSprint.id,
+            sprintId: targetSprint.id,
             assigneeId: defaultUser.id,
           }
         });
         syncedCount++;
       }
-      
+
+      // 6. Trả result API thành công
       res.json({ 
-        message: `Đã đồng bộ thành công ${syncedCount} tasks từ GitHub.`,
+        message: `Đã dọn dẹp và phân bổ ${syncedCount} tasks vào ${generatedSprints.length} Sprints lịch sử.`,
         sampleData: normalizedIssues.slice(0, 2) 
       });
     } catch (error: any) {
@@ -177,7 +241,7 @@ async function startServer() {
   const getSprintId = async (req: Request, res: Response) => {
     let sprintId = req.query.sprintId as string;
     if (!sprintId) {
-      const sprint = await prisma.sprint.findFirst();
+      const sprint = await prisma.sprint.findFirst({ orderBy: { startDate: 'desc' } });
       if (sprint) {
         sprintId = sprint.id;
       } else {
@@ -332,13 +396,23 @@ async function startServer() {
     }
   });
 
-  // --- ROOT ROUTE (Health Check) ---
-  app.get('/', (req, res) => {
-    res.send('AgileAI API Backend is running perfectly on Render! 🚀');
-  });
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 

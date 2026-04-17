@@ -447,6 +447,12 @@ export default function App() {
           </div>
         </div>
 
+        {syncMessage && (
+          <div className="p-4 bg-blue-50 text-blue-700 rounded-lg border border-blue-200 text-sm">
+            {syncMessage}
+          </div>
+        )}
+
         {/* KPIs */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
           <KPICard title="Velocity (Avg)" value={`${metrics.velocity} pts`} icon={TrendingUp} status="good" onClick={() => handleDrilldown('velocity', 'Velocity Details')} />
