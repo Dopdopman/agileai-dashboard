@@ -189,15 +189,12 @@ async function startServer() {
         }
 
         // Map title (fallback string)
-        let issueTitle = issue.title;
-        if (!issueTitle || typeof issueTitle !== 'string') {
-          issueTitle = `GitHub Task #${issue.id}`;
-        }
+        const safeTitle = issue.title ? String(issue.title) : `GitHub Task #${issue.id}`;
 
         await prisma.task.create({
           data: {
             id: issue.id,
-            title: issueTitle,
+            title: safeTitle,
             status: status,
             storyPoints: storyPoints,
             createdAt: issueCreatedAt,
