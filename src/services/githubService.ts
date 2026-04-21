@@ -9,7 +9,7 @@ export class GitHubService {
    * Fetches issues from a GitHub repository and extracts Agile metrics.
    */
   async fetchIssues(owner: string, repo: string) {
-    const url = `https://api.github.com/repos/${owner}/${repo}/issues?state=all&per_page=50`;
+    const url = `https://api.github.com/repos/${owner}/${repo}/issues?state=all&per_page=100&sort=updated&direction=desc`;
     
     const headers: Record<string, string> = {
       'Accept': 'application/vnd.github.v3+json',
@@ -49,10 +49,13 @@ export class GitHubService {
 
       return {
         id: `GH-${issue.number}`,
-        status: issue.state === 'closed' ? 'Done' : 'In Progress',
-        created_at: issue.created_at,
-        closed_at: issue.closed_at || null,
-        story_points: storyPoints
+        title: issue.title || `Issue #${issue.number}`,
+        state: issue.state,
+        assignees: issue.assignees,
+        createdAt: issue.created_at,
+        updatedAt: issue.updated_at || issue.created_at,
+        closedAt: issue.closed_at || null,
+        storyPoints: storyPoints
       };
     });
 
