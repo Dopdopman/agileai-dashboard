@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   LineChart, Line, AreaChart, Area
@@ -7,8 +7,10 @@ import {
   LayoutDashboard, BrainCircuit, AlertTriangle, 
   TrendingUp, Clock, Users, Activity, CheckCircle2,
   LogOut, Lock, RefreshCw, Filter, Download,
-  ArrowUpRight, ArrowDownRight, X, Mail, Globe, Hash, Database, Info
+  ArrowUpRight, ArrowDownRight, X, Mail, Globe, Hash, Database, Info, Shield
 } from 'lucide-react';
+import { useReactToPrint } from 'react-to-print';
+import ReactMarkdown from 'react-markdown';
 
 // --- Components ---
 const Card = ({ children, className = '' }: { children: React.ReactNode, className?: string }) => (
@@ -97,10 +99,17 @@ export default function App() {
   // AI Code Modal State
   const [isAiCodeModalOpen, setIsAiCodeModalOpen] = useState(false);
 
+  // Retrospective State
+  const [isRetroModalOpen, setIsRetroModalOpen] = useState(false);
+  const [retroReport, setRetroReport] = useState('');
+  const [isGeneratingRetro, setIsGeneratingRetro] = useState(false);
+
   // Drilldown State
   const [drilldownData, setDrilldownData] = useState<{ type: string; items: any[]; total: number } | null>(null);
   const [isDrilldownOpen, setIsDrilldownOpen] = useState(false);
   const [drilldownTitle, setDrilldownTitle] = useState('');
+
+  const printRef = useRef<HTMLDivElement>(null);
 
   // API Base URL for Vercel deployment
   const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
@@ -169,13 +178,20 @@ export default function App() {
       const timestamp = Date.now();
       const queryParam = targetSprintId ? `?sprintId=${targetSprintId}&t=${timestamp}` : `?t=${timestamp}`;
       
+      const targetSprint = sprints.find((s: any) => s.id === targetSprintId);
+      const scopeCreepCountPayload = targetSprint?.tasks?.filter((t: any) => new Date(t.createdAt) > new Date(targetSprint.startDate)).length || 0;
+
       const [velRes, burnRes, cycleRes, leadRes, prodRes, aiRes] = await Promise.all([
         fetch(`${API_BASE}/api/metrics/velocity${queryParam}`, { headers }),
         fetch(`${API_BASE}/api/metrics/burndown${queryParam}`, { headers }),
         fetch(`${API_BASE}/api/metrics/cycle-time${queryParam}`, { headers }),
         fetch(`${API_BASE}/api/metrics/lead-time${queryParam}`, { headers }),
         fetch(`${API_BASE}/api/metrics/productivity${queryParam}`, { headers }),
-        fetch(`${API_BASE}/api/ai/insights${queryParam}`, { headers })
+        fetch(`${API_BASE}/api/ai/insights${queryParam}`, { 
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scopeCreepCount: scopeCreepCountPayload })
+        })
       ]);
 
       if (velRes.status === 401 || velRes.status === 403) {
@@ -289,16 +305,29 @@ export default function App() {
     setDrilldownData({ type, items, total });
   };
 
-  const handleExport = () => {
-    // Basic CSV export simulation
-    const csvContent = "data:text/csv;charset=utf-8,Metric,Value\nVelocity," + metrics?.velocity + "\nLead Time," + metrics?.leadTime;
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "dashboard_export.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const handleExport = useReactToPrint({
+    contentRef: printRef,
+    documentTitle: 'Agile-Dashboard-Report',
+  });
+
+  const handleGenerateRetro = async () => {
+    setIsGeneratingRetro(true);
+    setIsRetroModalOpen(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/ai/retrospective?sprintId=${selectedSprintId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setRetroReport(data.report);
+      } else {
+        setRetroReport(`Error: ${data.error}`);
+      }
+    } catch (error) {
+      setRetroReport('Failed to generate retrospective.');
+    } finally {
+      setIsGeneratingRetro(false);
+    }
   };
 
   useEffect(() => {
@@ -450,8 +479,12 @@ export default function App() {
       })
       .slice(-6); // Chỉ lấy 6 Sprints mới nhất
 
+    const currentSprint = sprints.find(s => s.id === selectedSprintId);
+    const scopeCreepTasks = currentSprint?.tasks?.filter((t: any) => new Date(t.createdAt) > new Date(currentSprint.startDate)) || [];
+    const scopeCreepCount = scopeCreepTasks.length;
+
     return (
-      <div className="space-y-6">
+      <div className="space-y-6" ref={printRef} id="dashboard-report-content">
         {/* Header & Filters */}
         <div className="flex flex-col gap-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -467,7 +500,7 @@ export default function App() {
                 {metrics.healthStatus === 'Healthy' ? <CheckCircle2 className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
                 Status: {metrics.healthStatus}
               </div>
-              <button onClick={handleExport} className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm font-medium">
+              <button onClick={() => handleExport()} className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm font-medium">
                 <Download className="w-4 h-4" /> Export
               </button>
               <div className="flex items-center gap-2">
@@ -525,6 +558,26 @@ export default function App() {
               <option value="30d">Last 30 Days</option>
               <option value="custom">Custom Range</option>
             </select>
+
+            {/* Scope Creep Tracker */}
+            <div className="ml-auto group relative">
+              <div className={`px-4 py-2 rounded-lg border text-sm font-bold flex items-center gap-2 cursor-help transition-colors
+                ${scopeCreepCount > 0 ? 'bg-red-50 text-red-700 border-red-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}
+              `}>
+                {scopeCreepCount > 0 ? <AlertTriangle className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
+                {scopeCreepCount > 0 ? `⚠️ Scope Creep: +${scopeCreepCount} tasks added after sprint started` : 'Shielded: 0 Scope Creep'}
+              </div>
+              {scopeCreepCount > 0 && (
+                <div className="absolute right-0 top-12 bg-gray-900 text-white text-xs p-3 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 w-64 shadow-xl">
+                  <p className="font-semibold mb-2 border-b border-gray-700 pb-1">Added Tasks:</p>
+                  <ul className="space-y-1 list-disc pl-4">
+                    {scopeCreepTasks.map((t: any) => (
+                      <li key={t.id} className="truncate">{t.title}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -547,7 +600,7 @@ export default function App() {
                 <BrainCircuit className="w-6 h-6" />
               </div>
               <div className="flex-1">
-                <div className="flex items-center justify-between mb-3">
+                <div className="flex justify-between items-center mb-4">
                   <div className="flex items-center gap-2">
                     <h2 className="text-lg font-bold text-gray-900 tracking-tight">AI Sprint Risk Analysis</h2>
                     <button 
@@ -558,13 +611,22 @@ export default function App() {
                       <Info className="w-4 h-4" />
                     </button>
                   </div>
-                  <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold shadow-sm border ${
-                    aiInsights.riskPercentage > 70 ? 'bg-red-50 text-red-700 border-red-200' :
-                    aiInsights.riskPercentage >= 30 ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                    'bg-emerald-50 text-emerald-700 border-emerald-200'
-                  }`}>
-                    Risk Level: {aiInsights.riskPercentage}%
-                  </span>
+                  <div className="flex items-center gap-3">
+                    <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold shadow-sm border ${
+                      aiInsights.riskPercentage > 70 ? 'bg-red-50 text-red-700 border-red-200' :
+                      aiInsights.riskPercentage >= 30 ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                      'bg-emerald-50 text-emerald-700 border-emerald-200'
+                    }`}>
+                      Risk Level: {aiInsights.riskPercentage}%
+                    </span>
+                    <button
+                      onClick={handleGenerateRetro}
+                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors flex items-center gap-1"
+                    >
+                      <BrainCircuit className="w-3 h-3" />
+                      Generate Retrospective
+                    </button>
+                  </div>
                 </div>
                 <div className="text-gray-700 text-base whitespace-pre-wrap leading-relaxed">
                   {aiInsights.analysis}
@@ -711,7 +773,8 @@ export default function App() {
                     <YAxis dataKey="userName" type="category" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} width={100} />
                     <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
                     <Legend />
-                    <Bar dataKey="totalStoryPoints" fill="#10b981" radius={[0, 4, 4, 0]} name="Story Points" />
+                    <Bar dataKey="donePoints" stackId="a" fill="#10b981" radius={[0, 0, 0, 0]} name="Done Points" />
+                    <Bar dataKey="remainingPoints" stackId="a" fill="#f59e0b" radius={[0, 4, 4, 0]} name="Remaining Points" />
                   </BarChart>
                 </ResponsiveContainer>
               ) : (
@@ -1056,6 +1119,47 @@ class AgileAIModel:
                   </pre>
                 </div>
               </div>
+            </div>
+          </Card>
+        </div>
+      )}
+      {/* AI Retrospective Modal */}
+      {isRetroModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm">
+          <Card className="w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl bg-white border-indigo-100">
+            <div className="flex items-center justify-between p-6 border-b border-gray-100 bg-indigo-50/50 rounded-t-xl">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-indigo-100 text-indigo-600 rounded-lg">
+                  <BrainCircuit className="w-5 h-5" />
+                </div>
+                <h3 className="text-xl font-bold text-gray-900">Sprint Retrospective Report</h3>
+              </div>
+              <button onClick={() => setIsRetroModalOpen(false)} className="text-gray-400 hover:text-gray-600 p-2 rounded-full hover:bg-gray-100 transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1">
+              {isGeneratingRetro ? (
+                <div className="flex flex-col items-center justify-center py-12 space-y-4">
+                  <RefreshCw className="w-8 h-8 text-indigo-500 animate-spin" />
+                  <p className="text-gray-600 font-medium">AI Coach is analyzing your sprint...</p>
+                </div>
+              ) : (
+                <div className="markdown-body text-base">
+                  <ReactMarkdown
+                    components={{
+                      h3: ({node, ...props}) => <h3 className="text-xl font-bold mt-6 mb-3 text-gray-800" {...props} />,
+                      p: ({node, ...props}) => <p className="leading-relaxed text-gray-600 mb-4" {...props} />,
+                      ul: ({node, ...props}) => <ul className="list-disc pl-5 mb-4 text-gray-600 space-y-1" {...props} />,
+                      li: ({node, ...props}) => <li className="mb-1" {...props} />,
+                      strong: ({node, ...props}) => <strong className="font-semibold text-gray-900" {...props} />
+                    }}
+                  >
+                    {retroReport}
+                  </ReactMarkdown>
+                </div>
+              )}
             </div>
           </Card>
         </div>

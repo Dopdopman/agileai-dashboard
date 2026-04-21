@@ -204,7 +204,7 @@ async function startServer() {
             completedAt: issue.closedAt ? new Date(issue.closedAt) : null,
             projectId: defaultProject.id,
             sprintId: targetSprint.id,
-            assigneeId: defaultUser.id,
+            assigneeId: null,
           }
         });
         syncedCount++;
@@ -297,7 +297,7 @@ async function startServer() {
             prismaSprintId = undefined; // Fix Prisma type mismatch 
          }
 
-         let prismaAssigneeId: string | undefined = issue.assignee ? userMap.get(issue.assignee.accountId) : (defaultUser?.id || undefined);
+         let prismaAssigneeId: string | null = issue.assignee ? userMap.get(issue.assignee.accountId) : null;
 
          await prisma.task.create({
            data: {
@@ -437,10 +437,13 @@ async function startServer() {
       
       // Enhance productivity data with user names
       const enhancedProductivity = await Promise.all(productivity.map(async (p) => {
+        if (p.assigneeId === 'unassigned') {
+          return { ...p, userName: 'Unassigned' };
+        }
         const user = await prisma.user.findUnique({ where: { id: p.assigneeId! } });
         return {
           ...p,
-          userName: user?.name || 'Unknown'
+          userName: user?.name || 'Unknown User'
         };
       }));
       
@@ -457,10 +460,12 @@ async function startServer() {
   });
 
   // --- AI MODULE ENHANCEMENT (ML + LLM) ---
-  app.get('/api/ai/insights', authenticateToken, async (req, res) => {
+  app.post('/api/ai/insights', authenticateToken, async (req, res) => {
     try {
       const sprintId = await getSprintId(req, res);
       if (!sprintId) return;
+
+      const { scopeCreepCount } = req.body || {};
 
       // Fetch real metrics
       const velocity = await AgileMetricsService.calculateVelocity(sprintId);
@@ -475,6 +480,14 @@ async function startServer() {
       
       const inProgressTasks = allTasks.filter(t => t.status === 'In Progress' || t.status === 'Review' || t.status === 'In Dev');
       const inProgressDetails = inProgressTasks.map(t => `- [${t.id}] ${t.title} (${t.storyPoints || 0} pts)`).join('\n');
+
+      let scopeCreepInstruction = "";
+      if (typeof scopeCreepCount === 'number' && scopeCreepCount > 0) {
+        scopeCreepInstruction = `
+        Here is the scope creep data: ${scopeCreepCount} tasks were added after the sprint started.
+        RULE: If scopeCreepCount is greater than 0, you MUST explicitly warn about 'Scope Creep' in the 'Risk' section. You must state that adding tasks mid-sprint threatens the sprint goal and recommend strictly managing changes.
+        `;
+      }
 
       const prompt = `
         You are a Senior Agile Coach.
@@ -491,6 +504,8 @@ async function startServer() {
         
         Tasks CURRENTLY IN PROGRESS:
         ${inProgressDetails || 'No tasks currently in progress.'}
+
+        ${scopeCreepInstruction}
 
         MUST return a valid JSON object with the following structure:
         {
@@ -542,6 +557,62 @@ async function startServer() {
     } catch (error) {
       console.error('Error fetching AI insights:', error);
       res.status(500).json({ error: 'Failed to generate AI insights' });
+    }
+  });
+
+  app.get('/api/ai/retrospective', authenticateToken, async (req, res) => {
+    try {
+      const sprintId = await getSprintId(req, res);
+      if (!sprintId) return;
+
+      const allTasks = await prisma.task.findMany({ where: { sprintId } });
+      const completedTasks = allTasks.filter(t => t.status === 'Done' || t.status === 'closed' || t.status === 'Complete');
+      const inProgressTasks = allTasks.filter(t => t.status !== 'Done' && t.status !== 'closed' && t.status !== 'Complete');
+      
+      const completionRate = allTasks.length > 0 ? (completedTasks.length / allTasks.length) * 100 : 0;
+      const blockers = inProgressTasks.filter(t => t.status === 'Blocked' || t.title.toLowerCase().includes('bug'));
+
+      const prompt = `
+        You are an expert Agile Coach.
+        Generate a Sprint Retrospective Report based on these metrics:
+        - Total Tasks: ${allTasks.length}
+        - Completed: ${completedTasks.length} (${completionRate.toFixed(1)}%)
+        - Incomplete: ${inProgressTasks.length}
+        - Potential Blockers/Bugs detected: ${blockers.length}
+        
+        Write the report in Markdown with exactly these 3 headings:
+        ### ✅ What went well
+        ### ❌ What could be improved
+        ### 🎯 Action Items
+        
+        Make it actionable and natural. Avoid JSON, return raw markdown text.
+      `;
+
+      let retrospectiveMD = `### ✅ What went well\n- The team maintained good focus on core deliverables.\n- Stable completion rate for high-priority tasks.\n\n### ❌ What could be improved\n- Some tasks remained in progress at the end of the sprint.\n- A few blockers might have slowed down the momentum.\n\n### 🎯 Action Items\n- Review pending tasks in the backlog.\n- Discuss blockers in the next daily standup.\n- Plan capacity strictly for the next sprint.`;
+      
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (apiKey && apiKey !== 'mock-key' && apiKey !== 'MY_GEMINI_API_KEY') {
+        try {
+          const response = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-preview',
+            contents: prompt,
+            config: {
+              responseMimeType: "text/plain",
+            },
+          });
+          
+          if (response.text) {
+            retrospectiveMD = response.text.trim();
+          }
+        } catch (e: any) {
+          console.warn("Gemini API error (using fallback retro):", e.message || e);
+        }
+      }
+
+      res.json({ report: retrospectiveMD });
+    } catch (error) {
+      console.error('Error fetching AI retrospective:', error);
+      res.status(500).json({ error: 'Failed to generate AI retrospective' });
     }
   });
 
