@@ -6,6 +6,7 @@ import jwt from 'jsonwebtoken';
 import cors from 'cors';
 import { GoogleGenAI, Type } from '@google/genai';
 import { GitHubService } from './src/services/githubService.js';
+import { JiraService } from './src/services/jiraService.js';
 import { AgileMetricsService } from './src/services/AgileMetricsService.js';
 import { prisma } from './src/lib/prisma.js';
 
@@ -220,6 +221,113 @@ async function startServer() {
     }
   });
 
+  // --- REAL DATA INTEGRATION (JIRA API) ---
+  app.post('/api/jira/sync', authenticateToken, authorizeRole(['Admin', 'Manager']), async (req, res) => {
+    const { domain, email, apiToken, boardId } = req.body;
+    
+    if (!domain || !email || !apiToken || !boardId) {
+      res.status(400).json({ error: 'domain, email, apiToken, and boardId are required.' });
+      return;
+    }
+
+    try {
+      const defaultProject = await prisma.project.findFirst();
+      if (!defaultProject) {
+        res.status(400).json({ error: 'Missing default Project in database.' });
+        return;
+      }
+
+      const jiraService = new JiraService(domain, email, apiToken);
+      
+      const sprintsData = await jiraService.fetchSprints(boardId);
+      const issuesData = await jiraService.fetchIssues(boardId);
+
+      // 1. Clear old data
+      await prisma.task.deleteMany({ where: { projectId: defaultProject.id } });
+      await prisma.sprint.deleteMany({ where: { projectId: defaultProject.id } });
+
+      // 2. Save Sprints
+      const savedSprints = [];
+      for (const sprint of sprintsData) {
+        const startDate = sprint.startDate ? new Date(sprint.startDate) : new Date();
+        const endDate = sprint.endDate ? new Date(sprint.endDate) : new Date(startDate.getTime() + 14 * 24 * 60 * 60 * 1000);
+        
+        const newSprint = await prisma.sprint.create({
+          data: {
+            name: sprint.name || `Sprint ${sprint.id}`,
+            startDate,
+            endDate,
+            projectId: defaultProject.id,
+          }
+        });
+        savedSprints.push({ jiraId: sprint.id, prismaId: newSprint.id });
+      }
+
+      const sprintIdMap = new Map(savedSprints.map(s => [s.jiraId, s.prismaId]));
+
+      // 3. Upsert Users (Assignees)
+      const userMap = new Map();
+      for (const issue of issuesData) {
+        if (issue.assignee) {
+          if (!userMap.has(issue.assignee.accountId)) {
+            const dummyEmail = `${issue.assignee.accountId}@jira.local`;
+            const upsertedUser = await prisma.user.upsert({
+                where: { email: dummyEmail },
+                update: { name: issue.assignee.displayName },
+                create: { 
+                  name: issue.assignee.displayName, 
+                  email: dummyEmail,
+                  role: 'Developer'
+                }
+            });
+            userMap.set(issue.assignee.accountId, upsertedUser.id);
+          }
+        }
+      }
+
+      const defaultUser = await prisma.user.findFirst();
+
+      // 4. Save Tasks
+      let syncedCount = 0;
+      for (const issue of issuesData) {
+         let prismaSprintId: string | undefined = sprintIdMap.get(issue.sprintId);
+         if (!prismaSprintId && savedSprints.length > 0) {
+            prismaSprintId = savedSprints[savedSprints.length - 1].prismaId; // Fallback to last sprint
+         } else if (!prismaSprintId) {
+            prismaSprintId = undefined; // Fix Prisma type mismatch 
+         }
+
+         let prismaAssigneeId: string | undefined = issue.assignee ? userMap.get(issue.assignee.accountId) : (defaultUser?.id || undefined);
+
+         await prisma.task.create({
+           data: {
+             id: `JIRA-${issue.key}`,
+             title: issue.title,
+             status: issue.status,
+             storyPoints: issue.storyPoints || 0,
+             createdAt: new Date(issue.createdAt || new Date()),
+             updatedAt: new Date(issue.updatedAt || new Date()),
+             startedAt: issue.status !== 'To Do' ? new Date(issue.createdAt || new Date()) : null,
+             completedAt: issue.status === 'Done' ? new Date(issue.updatedAt || new Date()) : null,
+             projectId: defaultProject.id,
+             sprintId: prismaSprintId,
+             assigneeId: prismaAssigneeId,
+           }
+         });
+         syncedCount++;
+      }
+
+      res.json({
+        message: `Đã đồng bộ thành công ${syncedCount} tasks và ${savedSprints.length} Sprints từ Jira.`,
+        sampleData: issuesData.slice(0, 2)
+      });
+      
+    } catch (error: any) {
+      console.error("Jira Sync Error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // --- DASHBOARD ENDPOINTS (REAL DATA FROM PRISMA) ---
 
   app.get('/api/sprints', authenticateToken, async (req, res) => {
@@ -229,7 +337,23 @@ async function startServer() {
           id: true,
           name: true,
           startDate: true,
-          endDate: true
+          endDate: true,
+          tasks: {
+            select: {
+              id: true,
+              title: true,
+              status: true,
+              storyPoints: true,
+              createdAt: true,
+              startedAt: true,
+              completedAt: true,
+              assignee: {
+                select: {
+                  name: true
+                }
+              }
+            }
+          }
         },
         orderBy: {
           startDate: 'desc'

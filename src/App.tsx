@@ -6,8 +6,8 @@ import {
 import { 
   LayoutDashboard, BrainCircuit, AlertTriangle, 
   TrendingUp, Clock, Users, Activity, CheckCircle2,
-  LogOut, Lock, Github, RefreshCw, Filter, Download,
-  ArrowUpRight, ArrowDownRight, X
+  LogOut, Lock, RefreshCw, Filter, Download,
+  ArrowUpRight, ArrowDownRight, X, Mail, Globe, Hash, Database
 } from 'lucide-react';
 
 // --- Components ---
@@ -76,10 +76,16 @@ export default function App() {
   const [sprints, setSprints] = useState<any[]>([]);
   const [selectedSprintId, setSelectedSprintId] = useState<string>('');
   const [timeRange, setTimeRange] = useState('30d');
-  const [githubUrl, setGithubUrl] = useState('');
+  
+  // Jira Sync State
+  const [isJiraModalOpen, setIsJiraModalOpen] = useState(false);
+  const [jiraDomain, setJiraDomain] = useState('');
+  const [jiraEmail, setJiraEmail] = useState('');
+  const [jiraToken, setJiraToken] = useState('');
+  const [jiraBoardId, setJiraBoardId] = useState('');
 
   // Drilldown State
-  const [drilldownData, setDrilldownData] = useState<any[] | null>(null);
+  const [drilldownData, setDrilldownData] = useState<{ type: string; items: any[]; total: number } | null>(null);
   const [isDrilldownOpen, setIsDrilldownOpen] = useState(false);
   const [drilldownTitle, setDrilldownTitle] = useState('');
 
@@ -201,22 +207,73 @@ export default function App() {
     }
   };
 
-  const handleDrilldown = async (type: string, title: string) => {
-    if (!token) return;
+  const handleDrilldown = (type: string, title: string) => {
     setDrilldownTitle(title);
     setIsDrilldownOpen(true);
-    setDrilldownData(null); // Loading state
     
-    try {
-      const res = await fetch(`${API_BASE}/api/issues/drilldown?type=${type}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        setDrilldownData(await res.json());
-      }
-    } catch (err) {
-      console.error("Failed to fetch drilldown data", err);
+    // Process purely frontend data from the selected sprint
+    const sprint = sprints.find(s => s.id === selectedSprintId);
+    if (!sprint || !sprint.tasks) {
+      setDrilldownData({ type, items: [], total: 0 });
+      return;
     }
+
+    const tasks = sprint.tasks;
+    const doneTasks = tasks.filter((t: any) => t.status === 'Done' || t.status === 'closed' || t.status === 'Complete');
+    let items: any[] = [];
+    let total = 0;
+
+    if (type === 'velocity') {
+      items = doneTasks.map((t: any) => ({
+        id: t.id,
+        title: t.title,
+        assignee: t.assignee?.name || 'Unassigned',
+        points: Number(t.storyPoints) || 0
+      }));
+      total = items.reduce((sum, item) => sum + item.points, 0);
+    } else if (type === 'leadTime') {
+      items = doneTasks.map((t: any) => {
+        const created = new Date(t.createdAt);
+        const closed = t.completedAt ? new Date(t.completedAt) : new Date();
+        const days = Math.max(0, parseFloat(((closed.getTime() - created.getTime()) / (1000 * 3600 * 24)).toFixed(1)));
+        return {
+          id: t.id,
+          title: t.title,
+          createdAt: created.toLocaleDateString(),
+          closedAt: closed.toLocaleDateString(),
+          leadTime: days
+        };
+      });
+      total = items.reduce((sum, item) => sum + item.leadTime, 0) / (items.length || 1);
+    } else if (type === 'cycleTime') {
+      const startedDoneTasks = doneTasks.filter((t: any) => t.startedAt);
+      items = startedDoneTasks.map((t: any) => {
+        const started = new Date(t.startedAt);
+        const closed = t.completedAt ? new Date(t.completedAt) : new Date();
+        const days = Math.max(0, parseFloat(((closed.getTime() - started.getTime()) / (1000 * 3600 * 24)).toFixed(1)));
+        return {
+          id: t.id,
+          title: t.title,
+          startedAt: started.toLocaleDateString(),
+          closedAt: closed.toLocaleDateString(),
+          cycleTime: days
+        };
+      });
+      total = items.reduce((sum, item) => sum + item.cycleTime, 0) / (items.length || 1);
+    } else if (type === 'productivity') {
+      const assigned = doneTasks.reduce((acc: any, t: any) => {
+        const name = t.assignee?.name || 'Unassigned';
+        acc[name] = (acc[name] || 0) + (Number(t.storyPoints) || 0);
+        return acc;
+      }, {});
+      items = Object.keys(assigned).map(name => ({
+        name,
+        points: assigned[name]
+      })).sort((a, b) => b.points - a.points);
+      total = items.reduce((sum, item) => sum + item.points, 0);
+    }
+
+    setDrilldownData({ type, items, total });
   };
 
   const handleExport = () => {
@@ -243,32 +300,33 @@ export default function App() {
     }
   }, [token, selectedSprintId]);
 
-  const handleGitHubSync = async () => {
-    const regex = /github\.com\/([^\/]+)\/([^\/]+)/;
-    const match = githubUrl.match(regex);
-    
-    if (!match) {
-      alert('Vui lòng nhập URL GitHub hợp lệ (VD: https://github.com/facebook/react)');
+  const handleJiraSync = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!jiraDomain || !jiraEmail || !jiraToken || !jiraBoardId) {
+      alert('Vui lòng điền đầy đủ thông tin Jira');
       return;
     }
-
-    const repoOwner = match[1];
-    const repoName = match[2].replace(/\.git$/, '').replace(/\/$/, '');
 
     setIsSyncing(true);
     setSyncMessage('');
     try {
-      const res = await fetch(`${API_BASE}/api/github/sync`, {
+      const res = await fetch(`${API_BASE}/api/jira/sync`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ repoOwner, repoName })
+        body: JSON.stringify({ 
+          domain: jiraDomain, 
+          email: jiraEmail, 
+          apiToken: jiraToken, 
+          boardId: jiraBoardId 
+        })
       });
       const data = await res.json();
       if (res.ok) {
-        setSyncMessage(data.message || 'Đồng bộ thành công!');
+        setSyncMessage(data.message || 'Đồng bộ Jira thành công!');
+        setIsJiraModalOpen(false);
         const newSprints = await fetchSprints();
         if (newSprints && newSprints.length > 0) {
           const latestSprintId = newSprints[0].id;
@@ -279,9 +337,11 @@ export default function App() {
         }
       } else {
         setSyncMessage(`Lỗi: ${data.error}`);
+        setIsJiraModalOpen(false);
       }
     } catch (err) {
       setSyncMessage('Lỗi kết nối đến server.');
+      setIsJiraModalOpen(false);
     } finally {
       setIsSyncing(false);
     }
@@ -363,6 +423,20 @@ export default function App() {
 
     if (!metrics || !aiInsights) return <div className="p-8 text-center text-gray-500">No data available.</div>;
 
+    // Calculate historical velocity based on all sprints
+    const velocityData = [...sprints]
+      .sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime()) // Xếp tăng dần
+      .map(sprint => {
+        const donePoints = (sprint.tasks || []).reduce((sum: number, task: any) => {
+          if (task.status === 'Done' || task.status === 'closed' || task.status === 'Complete') {
+            return sum + (Number(task.storyPoints) || 0);
+          }
+          return sum;
+        }, 0);
+        return { name: sprint.name, velocity: donePoints };
+      })
+      .slice(-6); // Chỉ lấy 6 Sprints mới nhất
+
     return (
       <div className="space-y-6">
         {/* Header & Filters */}
@@ -384,20 +458,13 @@ export default function App() {
                 <Download className="w-4 h-4" /> Export
               </button>
               <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  placeholder="https://github.com/owner/repo"
-                  value={githubUrl}
-                  onChange={(e) => setGithubUrl(e.target.value)}
-                  className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none w-64"
-                />
                 <button 
-                  onClick={handleGitHubSync}
-                  disabled={isSyncing || !githubUrl}
-                  className="flex items-center gap-2 px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:opacity-50 transition-colors text-sm font-medium shrink-0"
+                  onClick={() => setIsJiraModalOpen(true)}
+                  disabled={isSyncing}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors text-sm font-medium shrink-0 shadow-sm"
                 >
-                  {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Github className="w-4 h-4" />}
-                  {isSyncing ? 'Đang phân tích...' : 'Phân tích Dự án'}
+                  {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
+                  {isSyncing ? 'Đang đồng bộ Jira...' : 'Kết nối Jira'}
                 </button>
               </div>
             </div>
@@ -539,47 +606,51 @@ export default function App() {
               <h3 className="text-lg font-semibold text-gray-900">Sprint Burndown</h3>
             </div>
             <div className="h-80">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={burndownData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
-                  <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
-                  <YAxis axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
-                  <Tooltip 
-                    contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}}
-                    content={({ active, payload, label }) => {
-                      if (active && payload && payload.length) {
-                        const data = payload[0].payload;
-                        return (
-                          <div className="bg-white p-3 rounded-lg shadow-lg border border-gray-100">
-                            <p className="font-semibold text-gray-900 mb-2">{label}</p>
-                            <div className="space-y-1 text-sm">
-                              <p className="text-blue-600">
-                                <span className="inline-block w-3 h-3 rounded-full bg-blue-500 mr-2"></span>
-                                Remaining: <span className="font-medium">{data.remainingPoints} pts</span>
-                              </p>
-                              <p className="text-gray-500">
-                                <span className="inline-block w-3 h-3 rounded-full bg-gray-400 mr-2"></span>
-                                Burned: <span className="font-medium text-gray-900">{data.burnedPoints} pts</span>
-                              </p>
+              {burndownData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={burndownData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                    <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
+                    <YAxis axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
+                    <Tooltip 
+                      contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}}
+                      content={({ active, payload, label }) => {
+                        if (active && payload && payload.length) {
+                          const data = payload[0].payload;
+                          return (
+                            <div className="bg-white p-3 rounded-lg shadow-lg border border-gray-100">
+                              <p className="font-semibold text-gray-900 mb-2">{label}</p>
+                              <div className="space-y-1 text-sm">
+                                <p className="text-blue-600">
+                                  <span className="inline-block w-3 h-3 rounded-full bg-blue-500 mr-2"></span>
+                                  Remaining: <span className="font-medium">{data.remainingPoints} pts</span>
+                                </p>
+                                <p className="text-gray-500">
+                                  <span className="inline-block w-3 h-3 rounded-full bg-gray-400 mr-2"></span>
+                                  Burned: <span className="font-medium text-gray-900">{data.burnedPoints} pts</span>
+                                </p>
+                              </div>
                             </div>
-                          </div>
-                        );
-                      }
-                      return null;
-                    }}
-                  />
-                  <Legend />
-                  <Line 
-                    type="monotone" 
-                    dataKey="remainingPoints" 
-                    stroke="#3b82f6" 
-                    strokeWidth={3} 
-                    dot={{ r: 4, fill: "#3b82f6", stroke: "#fff", strokeWidth: 2 }}
-                    activeDot={{ r: 6 }}
-                    name="Remaining Points" 
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+                          );
+                        }
+                        return null;
+                      }}
+                    />
+                    <Legend />
+                    <Line 
+                      type="monotone" 
+                      dataKey="remainingPoints" 
+                      stroke="#3b82f6" 
+                      strokeWidth={3} 
+                      dot={{ r: 4, fill: "#3b82f6", stroke: "#fff", strokeWidth: 2 }}
+                      activeDot={{ r: 6 }}
+                      name="Remaining Points" 
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex items-center justify-center h-full text-gray-500 text-sm">No burndown data available</div>
+              )}
             </div>
           </Card>
 
@@ -587,15 +658,19 @@ export default function App() {
           <Card className="p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-6">Sprint Velocity</h3>
             <div className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={[{ name: 'Current Sprint', velocity: metrics.velocity }]}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
-                  <YAxis axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
-                  <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
-                  <Bar dataKey="velocity" fill="#3b82f6" radius={[4, 4, 0, 0]} name="Velocity (pts)" barSize={60} />
-                </BarChart>
-              </ResponsiveContainer>
+              {velocityData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={velocityData}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
+                    <YAxis axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
+                    <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
+                    <Bar dataKey="velocity" fill="#3b82f6" radius={[4, 4, 0, 0]} name="Velocity (pts)" barSize={40} />
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex items-center justify-center h-full text-gray-500 text-sm">No velocity data available</div>
+              )}
             </div>
           </Card>
 
@@ -603,16 +678,20 @@ export default function App() {
           <Card className="p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-6">Team Productivity</h3>
             <div className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={productivityData} layout="vertical">
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e5e7eb" />
-                  <XAxis type="number" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
-                  <YAxis dataKey="userName" type="category" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} width={100} />
-                  <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
-                  <Legend />
-                  <Bar dataKey="totalStoryPoints" fill="#10b981" radius={[0, 4, 4, 0]} name="Story Points" />
-                </BarChart>
-              </ResponsiveContainer>
+              {productivityData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={productivityData} layout="vertical">
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e5e7eb" />
+                    <XAxis type="number" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} />
+                    <YAxis dataKey="userName" type="category" axisLine={false} tickLine={false} tick={{fill: '#6b7280', fontSize: 12}} width={100} />
+                    <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
+                    <Legend />
+                    <Bar dataKey="totalStoryPoints" fill="#10b981" radius={[0, 4, 4, 0]} name="Story Points" />
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex items-center justify-center h-full text-gray-500 text-sm">No productivity data available</div>
+              )}
             </div>
           </Card>
         </div>
@@ -760,23 +839,98 @@ class AgileAIModel:
                   <div className="flex justify-center items-center h-32">
                     <RefreshCw className="w-6 h-6 text-blue-500 animate-spin" />
                   </div>
-                ) : drilldownData.length === 0 ? (
+                ) : drilldownData.items && drilldownData.items.length === 0 ? (
                   <div className="text-center text-gray-500 py-8">No detailed data available.</div>
                 ) : (
                   <div className="space-y-4">
-                    {drilldownData.map((item: any, i: number) => (
-                      <div key={i} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg border border-gray-100">
-                        <div>
-                          <div className="font-medium text-gray-900">{item.id} - {item.title}</div>
-                          <div className="text-sm text-gray-500 mt-1">Status: {item.status}</div>
-                        </div>
-                        <div className="text-right">
-                          {item.points && <div className="font-bold text-blue-600">{item.points} pts</div>}
-                          {item.cycleTime && <div className="font-bold text-amber-600">{item.cycleTime}</div>}
-                          {item.completedAt && <div className="text-xs text-gray-500 mt-1">{item.completedAt}</div>}
-                        </div>
-                      </div>
-                    ))}
+                    <div className="overflow-x-auto rounded-lg border border-gray-200">
+                      <table className="w-full text-left text-sm whitespace-nowrap">
+                        <thead className="bg-gray-50 border-b border-gray-200">
+                          {drilldownData.type === 'velocity' && (
+                            <tr>
+                              <th className="px-4 py-3 font-semibold text-gray-700">Issue ID</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700 w-full">Title</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700">Assignee</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700 text-right">Story Points</th>
+                            </tr>
+                          )}
+                          {drilldownData.type === 'leadTime' && (
+                            <tr>
+                              <th className="px-4 py-3 font-semibold text-gray-700">Issue ID</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700 w-full">Title</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700">Created At</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700">Closed At</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700 text-right">Lead Time (days)</th>
+                            </tr>
+                          )}
+                          {drilldownData.type === 'cycleTime' && (
+                            <tr>
+                              <th className="px-4 py-3 font-semibold text-gray-700">Issue ID</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700 w-full">Title</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700">Started At</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700">Closed At</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700 text-right">Cycle Time (days)</th>
+                            </tr>
+                          )}
+                          {drilldownData.type === 'productivity' && (
+                            <tr>
+                              <th className="px-4 py-3 font-semibold text-gray-700 w-full">Assignee</th>
+                              <th className="px-4 py-3 font-semibold text-gray-700 text-right">Story Points Completed</th>
+                            </tr>
+                          )}
+                        </thead>
+                        <tbody className="divide-y divide-gray-200">
+                          {drilldownData.items.map((item: any, i: number) => (
+                            <tr key={i} className="hover:bg-gray-50 transition-colors">
+                              {drilldownData.type === 'velocity' && (
+                                <>
+                                  <td className="px-4 py-3 font-medium text-blue-600">{item.id}</td>
+                                  <td className="px-4 py-3 text-gray-900 truncate max-w-[200px]">{item.title}</td>
+                                  <td className="px-4 py-3 text-gray-500">{item.assignee}</td>
+                                  <td className="px-4 py-3 text-right font-medium">{item.points}</td>
+                                </>
+                              )}
+                              {drilldownData.type === 'leadTime' && (
+                                <>
+                                  <td className="px-4 py-3 font-medium text-blue-600">{item.id}</td>
+                                  <td className="px-4 py-3 text-gray-900 truncate max-w-[200px]">{item.title}</td>
+                                  <td className="px-4 py-3 text-gray-500">{item.createdAt}</td>
+                                  <td className="px-4 py-3 text-gray-500">{item.closedAt}</td>
+                                  <td className="px-4 py-3 text-right font-medium text-amber-600">{item.leadTime}</td>
+                                </>
+                              )}
+                              {drilldownData.type === 'cycleTime' && (
+                                <>
+                                  <td className="px-4 py-3 font-medium text-blue-600">{item.id}</td>
+                                  <td className="px-4 py-3 text-gray-900 truncate max-w-[200px]">{item.title}</td>
+                                  <td className="px-4 py-3 text-gray-500">{item.startedAt}</td>
+                                  <td className="px-4 py-3 text-gray-500">{item.closedAt}</td>
+                                  <td className="px-4 py-3 text-right font-medium text-amber-600">{item.cycleTime}</td>
+                                </>
+                              )}
+                              {drilldownData.type === 'productivity' && (
+                                <>
+                                  <td className="px-4 py-3 font-medium text-gray-900">{item.name}</td>
+                                  <td className="px-4 py-3 text-right font-medium text-green-600">{item.points}</td>
+                                </>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="bg-blue-50 border-t border-gray-200">
+                          <tr>
+                            <td colSpan={drilldownData.type === 'productivity' ? 1 : drilldownData.type === 'velocity' ? 3 : 4} className="px-4 py-3 font-bold text-gray-900 text-right">
+                              {drilldownData.type === 'productivity' || drilldownData.type === 'velocity' ? 'Total / Avg:' : 'Average:'}
+                            </td>
+                            <td className="px-4 py-3 font-bold text-blue-700 text-right">
+                              {drilldownData.type === 'productivity' || drilldownData.type === 'velocity' 
+                                ? drilldownData.total 
+                                : drilldownData.total.toFixed(1)}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
                   </div>
                 )}
               </div>
@@ -784,6 +938,106 @@ class AgileAIModel:
           </div>
         )}
       </main>
+
+      {/* Jira Configuration Modal */}
+      {isJiraModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm">
+          <Card className="w-full max-w-md shadow-2xl">
+            <div className="flex items-center justify-between p-6 border-b border-gray-100 bg-gray-50/50">
+              <div className="flex items-center gap-2">
+                <Database className="w-5 h-5 text-blue-600" />
+                <h3 className="text-lg font-bold text-gray-900">Kết nối Jira Software</h3>
+              </div>
+              <button onClick={() => setIsJiraModalOpen(false)} className="text-gray-400 hover:text-gray-600 p-1 rounded-md hover:bg-gray-100 transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleJiraSync} className="p-6 space-y-5">
+              <p className="text-sm text-gray-500 mb-2">Đồng bộ dữ liệu Agile (Sprints, Issues) trực tiếp từ Jira Board của bạn.</p>
+              
+              <div className="space-y-1">
+                <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  <Globe className="w-4 h-4 text-gray-400" />
+                  Jira Domain
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. your-company.atlassian.net"
+                  value={jiraDomain}
+                  onChange={e => setJiraDomain(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-shadow"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  <Mail className="w-4 h-4 text-gray-400" />
+                  Email Đăng Nhập
+                </label>
+                <input
+                  type="email"
+                  required
+                  placeholder="name@company.com"
+                  value={jiraEmail}
+                  onChange={e => setJiraEmail(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-shadow"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  <Lock className="w-4 h-4 text-gray-400" />
+                  Jira API Token
+                </label>
+                <input
+                  type="password"
+                  required
+                  placeholder="Nhập API Token của bạn..."
+                  value={jiraToken}
+                  onChange={e => setJiraToken(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-shadow"
+                />
+                <p className="text-xs text-blue-600 mt-1 cursor-pointer hover:underline text-right">Cách lấy API Token?</p>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  <Hash className="w-4 h-4 text-gray-400" />
+                  Board ID
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. 1"
+                  value={jiraBoardId}
+                  onChange={e => setJiraBoardId(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-shadow"
+                />
+              </div>
+
+              <div className="pt-4 flex justify-end gap-3 border-t border-gray-100 mt-6">
+                <button
+                  type="button"
+                  onClick={() => setIsJiraModalOpen(false)}
+                  className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors text-sm font-medium"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSyncing}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors text-sm font-medium focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                >
+                  {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
+                  {isSyncing ? 'Đang kết nối...' : 'Bắt đầu Đồng bộ'}
+                </button>
+              </div>
+            </form>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
