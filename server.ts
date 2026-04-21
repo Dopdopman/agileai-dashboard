@@ -467,22 +467,42 @@ async function startServer() {
       const cycleTime = await AgileMetricsService.calculateCycleTime(sprintId);
       const leadTime = await AgileMetricsService.calculateLeadTime(sprintId);
 
+      // Fetch task data
+      const allTasks = await prisma.task.findMany({ where: { sprintId } });
+      const totalPoints = allTasks.reduce((sum, t) => sum + (t.storyPoints || 0), 0);
+      const completedPoints = allTasks.filter(t => t.status === 'Done' || t.status === 'closed' || t.status === 'Complete').reduce((sum, t) => sum + (t.storyPoints || 0), 0);
+      const remainingPoints = totalPoints - completedPoints;
+      
+      const inProgressTasks = allTasks.filter(t => t.status === 'In Progress' || t.status === 'Review' || t.status === 'In Dev');
+      const inProgressDetails = inProgressTasks.map(t => `- [${t.id}] ${t.title} (${t.storyPoints || 0} pts)`).join('\n');
+
       const prompt = `
-        You are an expert Agile Coach and AI system.
-        Analyze the following project metrics for the current sprint:
-        - Current Velocity: ${velocity} points
+        You are a Senior Agile Coach.
+        Analyze the following project metrics for the current sprint and provide an Executive Summary in English.
+        Make it sound professional, natural, and insightful. Tell a 'data story'.
+        
+        Metrics:
+        - Total Sprint Points: ${totalPoints} pts
+        - Completed Points: ${completedPoints} pts
+        - Remaining Points: ${remainingPoints} pts
+        - Historical Velocity: ${velocity} pts
         - Average Cycle Time: ${cycleTime} days
         - Average Lead Time: ${leadTime} days
+        
+        Tasks CURRENTLY IN PROGRESS:
+        ${inProgressDetails || 'No tasks currently in progress.'}
 
-        Provide a risk analysis for this sprint.
-        Return a JSON object with:
-        1. riskPercentage: A number between 0 and 100 representing the risk of the sprint failing or being delayed.
-        2. analysis: A short 1-sentence actionable analysis (under 50 words).
+        MUST return a valid JSON object with the following structure:
+        {
+          "riskPercentage": A number from 0-100 indicating sprint delay risk,
+          "analysis": "Provide a 1-2 paragraph Executive Summary. Tell a 'data story' about the sprint's health, bottlenecks (if any based on cycle time or specific pending tasks), and next steps. Make it flow naturally. Use Markdown bold (**) to highlight key numbers or task IDs. DO NOT use 1,2,3 lists."
+        }
+        Note: Ensure 'analysis' supports line breaks (\\n) for UI display.
       `;
 
       let insightData = {
         riskPercentage: 15,
-        analysis: "Metrics look stable, but keep an eye on cycle time."
+        analysis: `The sprint is currently on track with a solid velocity of **${velocity} pts**. There are no significant bottlenecks identified at the moment, but the team should maintain this momentum to ensure all remaining **${remainingPoints} pts** are delivered successfully.`
       };
       
       const apiKey = process.env.GEMINI_API_KEY;
@@ -502,7 +522,7 @@ async function startServer() {
                   },
                   analysis: {
                     type: Type.STRING,
-                    description: "Short analysis under 50 words",
+                    description: "Detailed analysis with 3 markdown sections",
                   },
                 },
                 required: ["riskPercentage", "analysis"],
