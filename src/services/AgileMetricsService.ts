@@ -77,27 +77,48 @@ export class AgileMetricsService {
   }
 
   /**
-   * 4. Team Productivity: Tổng story points hoàn thành theo từng thành viên
+   * 4. Team Productivity: Tổng story points hoàn thành và điểm còn lại theo từng thành viên
    */
   static async calculateTeamProductivity(sprintId: string) {
-    // Sử dụng groupBy để nhóm theo assigneeId và tính tổng story points
-    const productivity = await prisma.task.groupBy({
-      by: ['assigneeId'],
-      _sum: {
-        storyPoints: true,
-      },
+    const tasks = await prisma.task.findMany({
       where: {
         sprintId,
-        status: 'Done',
-        assigneeId: { not: null }, // Bỏ qua các task không có người nhận
       },
+      select: {
+        assigneeId: true,
+        storyPoints: true,
+        status: true,
+      }
     });
 
-    // Format lại kết quả cho dễ đọc
-    return productivity.map((item) => ({
-      assigneeId: item.assigneeId,
-      totalStoryPoints: item._sum.storyPoints || 0,
-    }));
+    const userStats = new Map<string, { donePoints: number, remainingPoints: number }>();
+
+    for (const task of tasks) {
+      const assigneeKey = task.assigneeId || 'unassigned';
+      
+      const stats = userStats.get(assigneeKey) || { donePoints: 0, remainingPoints: 0 };
+      const points = task.storyPoints || 0;
+      
+      if (task.status === 'Done' || task.status === 'closed' || task.status === 'Complete') {
+        stats.donePoints += points;
+      } else {
+        stats.remainingPoints += points;
+      }
+      
+      userStats.set(assigneeKey, stats);
+    }
+
+    const productivity: any[] = [];
+    userStats.forEach((stats, assigneeId) => {
+      productivity.push({
+        assigneeId,
+        totalStoryPoints: stats.donePoints, // Backward compatibility
+        donePoints: stats.donePoints,
+        remainingPoints: stats.remainingPoints
+      });
+    });
+
+    return productivity;
   }
 
   /**
