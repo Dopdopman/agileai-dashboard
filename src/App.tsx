@@ -104,6 +104,9 @@ export default function App() {
   const [retroReport, setRetroReport] = useState('');
   const [isGeneratingRetro, setIsGeneratingRetro] = useState(false);
 
+  // Scope Creep State
+  const [isScopeCreepModalOpen, setIsScopeCreepModalOpen] = useState(false);
+
   // Drilldown State
   const [drilldownData, setDrilldownData] = useState<{ type: string; items: any[]; total: number } | null>(null);
   const [isDrilldownOpen, setIsDrilldownOpen] = useState(false);
@@ -179,7 +182,54 @@ export default function App() {
       const queryParam = targetSprintId ? `?sprintId=${targetSprintId}&t=${timestamp}` : `?t=${timestamp}`;
       
       const targetSprint = sprints.find((s: any) => s.id === targetSprintId);
-      const scopeCreepCountPayload = targetSprint?.tasks?.filter((t: any) => new Date(t.createdAt) > new Date(targetSprint.startDate)).length || 0;
+      const isPastSprint = targetSprint ? new Date(targetSprint.endDate) < new Date() : false;
+      const sprintTasks = targetSprint?.tasks || [];
+      
+      let scopeCreepCountPayload = 0;
+      if (!isPastSprint && targetSprint) {
+        scopeCreepCountPayload = sprintTasks.filter((t: any) => new Date(t.createdAt) > new Date(targetSprint.startDate)).length || 0;
+      }
+      
+      let inProgressCount = 0;
+      let remainingPoints = 0;
+      sprintTasks.forEach((task: any) => {
+        const statusLower = (task.status || '').toLowerCase();
+        if (!(statusLower.includes('done') || statusLower.includes('closed') || statusLower.includes('complete'))) {
+          remainingPoints += parseInt(task.storyPoints?.toString() || '0', 10);
+          if (['in progress', 'blocked', 'review'].some(s => statusLower.includes(s))) inProgressCount++;
+        }
+      });
+
+      // 1. Force calculation of At Risk Issues
+      let calculatedAtRisk: any[] = [];
+      if (!isPastSprint && targetSprint && targetSprint.tasks) {
+        calculatedAtRisk = targetSprint.tasks.filter((task: any) => {
+          const status = (task.status || '').toLowerCase();
+          const isDone = status.includes('done') || status.includes('closed') || status.includes('complete');
+          if (isDone) return false; // Bỏ qua task đã xong
+
+          const points = Number(task.storyPoints) || 0;
+          
+          // Tính số ngày ngâm task
+          const createdDate = new Date(task.createdAt || new Date());
+          const today = new Date();
+          const daysInProg = Math.floor((today.getTime() - createdDate.getTime()) / (1000 * 3600 * 24));
+
+          return points >= 8 || daysInProg >= 3;
+        }).map((task: any) => ({
+          id: task.id || 'N/A',
+          title: task.title,
+          timeInProgress: 'High Risk', 
+          status: task.status || 'In Progress'
+        }));
+      }
+      setAtRiskIssues(calculatedAtRisk);
+
+      const sprintContext = {
+        inProgressCount,
+        remainingPoints,
+        atRiskDetails: calculatedAtRisk.map(i => `[${i.id}] ${i.title} (Status: ${i.status}, Pending: ${i.timeInProgress})`).join(', ')
+      };
 
       const [velRes, burnRes, cycleRes, leadRes, prodRes, aiRes] = await Promise.all([
         fetch(`${API_BASE}/api/metrics/velocity${queryParam}`, { headers }),
@@ -190,7 +240,11 @@ export default function App() {
         fetch(`${API_BASE}/api/ai/insights${queryParam}`, { 
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scopeCreepCount: scopeCreepCountPayload })
+          body: JSON.stringify({ 
+            scopeCreepCount: scopeCreepCountPayload, 
+            atRiskCount: calculatedAtRisk.length,
+            sprintContext 
+          })
         })
       ]);
 
@@ -227,7 +281,6 @@ export default function App() {
       setTrends([]);
       setRanking([]);
       setCompare([]);
-      setAtRiskIssues([]);
     } catch (error) {
       console.error("Failed to fetch dashboard data", error);
       setError('Failed to load dashboard data. Please try again later.');
@@ -314,8 +367,16 @@ export default function App() {
     setIsGeneratingRetro(true);
     setIsRetroModalOpen(true);
     try {
+      const targetSprint = sprints.find((s: any) => s.id === selectedSprintId);
+      const sprintTasks = targetSprint?.tasks || [];
+
       const res = await fetch(`${API_BASE}/api/ai/retrospective?sprintId=${selectedSprintId}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json' 
+        },
+        body: JSON.stringify({ tasks: sprintTasks })
       });
       const data = await res.json();
       if (res.ok) {
@@ -480,7 +541,8 @@ export default function App() {
       .slice(-6); // Chỉ lấy 6 Sprints mới nhất
 
     const currentSprint = sprints.find(s => s.id === selectedSprintId);
-    const scopeCreepTasks = currentSprint?.tasks?.filter((t: any) => new Date(t.createdAt) > new Date(currentSprint.startDate)) || [];
+    const isPastSprintUI = currentSprint ? new Date(currentSprint.endDate) < new Date() : false;
+    const scopeCreepTasks = isPastSprintUI ? [] : (currentSprint?.tasks?.filter((t: any) => new Date(t.createdAt) > new Date(currentSprint.startDate)) || []);
     const scopeCreepCount = scopeCreepTasks.length;
 
     return (
@@ -527,12 +589,12 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-4 p-4 bg-white rounded-xl border border-gray-200 shadow-sm">
             <div className="flex items-center gap-2 text-gray-500">
               <Filter className="w-4 h-4" />
-              <span className="text-sm font-medium">Filters:</span>
+              <span className="text-sm font-medium">Sprint Filter:</span>
             </div>
             <select 
               value={selectedSprintId} 
               onChange={e => setSelectedSprintId(e.target.value)}
-              className="text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500 outline-none p-2"
+              className="text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500 outline-none p-2.5 flex-1 min-w-[300px]"
             >
               {sprints.map(sprint => (
                 <option key={sprint.id} value={sprint.id}>
@@ -540,46 +602,26 @@ export default function App() {
                 </option>
               ))}
             </select>
-            <select 
-              value={selectedProject} 
-              onChange={e => setSelectedProject(e.target.value)}
-              className="text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500 outline-none p-2"
-            >
-              <option>All Projects</option>
-              <option>Project Alpha</option>
-              <option>Project Beta</option>
-            </select>
-            <select 
-              value={timeRange} 
-              onChange={e => setTimeRange(e.target.value)}
-              className="text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500 outline-none p-2"
-            >
-              <option value="7d">Last 7 Days</option>
-              <option value="30d">Last 30 Days</option>
-              <option value="custom">Custom Range</option>
-            </select>
-
-            {/* Scope Creep Tracker */}
-            <div className="ml-auto group relative">
-              <div className={`px-4 py-2 rounded-lg border text-sm font-bold flex items-center gap-2 cursor-help transition-colors
-                ${scopeCreepCount > 0 ? 'bg-red-50 text-red-700 border-red-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}
-              `}>
-                {scopeCreepCount > 0 ? <AlertTriangle className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
-                {scopeCreepCount > 0 ? `⚠️ Scope Creep: +${scopeCreepCount} tasks added after sprint started` : 'Shielded: 0 Scope Creep'}
-              </div>
-              {scopeCreepCount > 0 && (
-                <div className="absolute right-0 top-12 bg-gray-900 text-white text-xs p-3 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 w-64 shadow-xl">
-                  <p className="font-semibold mb-2 border-b border-gray-700 pb-1">Added Tasks:</p>
-                  <ul className="space-y-1 list-disc pl-4">
-                    {scopeCreepTasks.map((t: any) => (
-                      <li key={t.id} className="truncate">{t.title}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
           </div>
         </div>
+
+        {/* Scope Creep Alert Banner */}
+        {scopeCreepCount > 0 && (
+          <div className="bg-red-50 border-l-4 border-red-500 rounded-md shadow-sm p-4 flex flex-col sm:flex-row justify-between sm:items-center gap-4">
+            <div className="flex items-center gap-3 text-red-800">
+              <AlertTriangle className="w-5 h-5 shrink-0" />
+              <span className="text-sm font-medium">
+                <strong>Scope Creep Detected:</strong> {scopeCreepCount} tasks were added after the sprint started.
+              </span>
+            </div>
+            <button 
+              onClick={() => setIsScopeCreepModalOpen(true)}
+              className="px-4 py-2 bg-white border border-red-200 text-red-700 text-sm font-medium rounded-lg hover:bg-red-100 transition-colors shrink-0 shadow-sm"
+            >
+              View Details
+            </button>
+          </div>
+        )}
 
         {/* KPIs */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
@@ -783,6 +825,68 @@ export default function App() {
             </div>
           </Card>
         </div>
+
+        {/* Scope Creep Tasks Modal */}
+        {isScopeCreepModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm">
+            <Card className="w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl bg-white border-red-100">
+              <div className="flex items-center justify-between p-6 border-b border-gray-100 bg-red-50 rounded-t-xl">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 bg-red-100 text-red-600 rounded-lg">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-gray-900">Scope Creep Details</h3>
+                    <p className="text-sm text-red-600 font-medium">{scopeCreepCount} tasks injected post-planning</p>
+                  </div>
+                </div>
+                <button onClick={() => setIsScopeCreepModalOpen(false)} className="text-gray-400 hover:text-gray-600 p-2 rounded-full hover:bg-gray-100 transition-colors">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <div className="p-6 overflow-y-auto flex-1 bg-gray-50/50">
+                <div className="space-y-3">
+                  {scopeCreepTasks.map((task: any) => {
+                    const statusLower = (task.status || '').toLowerCase();
+                    const isCompleted = statusLower.includes('done') || statusLower.includes('closed') || statusLower.includes('complete');
+
+                    return (
+                      <div key={task.id} className={`p-4 bg-white border ${!isCompleted ? 'border-red-300 shadow-red-100 hover:shadow-red-200' : 'border-gray-200 hover:shadow-md'} rounded-lg shadow-sm transition-shadow`}>
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">{task.key || task.id}</span>
+                              <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                                isCompleted ? 'bg-green-100 text-green-700' :
+                                statusLower.includes('in progress') ? 'bg-amber-100 text-amber-700' :
+                                'bg-red-100 text-red-700'
+                              }`}>
+                                {task.status}
+                              </span>
+                            </div>
+                            <h4 className={`font-medium ${!isCompleted ? 'text-red-700 font-bold' : 'text-gray-900'}`}>{task.title}</h4>
+                          </div>
+                          {task.storyPoints ? (
+                            <div className="text-right">
+                              <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-indigo-50 text-indigo-700 font-bold text-sm">
+                                {task.storyPoints}
+                              </span>
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="mt-3 text-xs text-gray-500 flex items-center gap-1">
+                          <Clock className="w-3.5 h-3.5" />
+                          Added on: {new Date(task.createdAt).toLocaleString()}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
       </div>
     );
   };

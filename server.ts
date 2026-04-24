@@ -231,10 +231,14 @@ async function startServer() {
     }
 
     try {
-      const defaultProject = await prisma.project.findFirst();
+      let defaultProject = await prisma.project.findFirst();
       if (!defaultProject) {
-        res.status(400).json({ error: 'Missing default Project in database.' });
-        return;
+        defaultProject = await prisma.project.create({
+            data: {
+                name: "F-Bites : Food Rescue",
+                description: "Auto-generated project for Jira Sync"
+            }
+        });
       }
 
       const jiraService = new JiraService(domain, email, apiToken);
@@ -465,7 +469,7 @@ async function startServer() {
       const sprintId = await getSprintId(req, res);
       if (!sprintId) return;
 
-      const { scopeCreepCount } = req.body || {};
+      const { scopeCreepCount, atRiskCount, sprintContext } = req.body || {};
 
       // Fetch real metrics
       const velocity = await AgileMetricsService.calculateVelocity(sprintId);
@@ -479,52 +483,32 @@ async function startServer() {
       const remainingPoints = totalPoints - completedPoints;
       
       const inProgressTasks = allTasks.filter(t => t.status === 'In Progress' || t.status === 'Review' || t.status === 'In Dev');
-      const inProgressDetails = inProgressTasks.map(t => `- [${t.id}] ${t.title} (${t.storyPoints || 0} pts)`).join('\n');
+      const prompt = `Dự án đang có ${req.body.scopeCreepCount || 0} task bị nhét thêm giữa chừng và ${req.body.atRiskCount || 0} task đang bị kẹt ở trạng thái rủi ro cao. 
+LUẬT TỐI THƯỢNG: Nếu 1 trong 2 con số này lớn hơn 0, ngươi BẮT BUỘC phải mở đầu bằng '⚠️ CRITICAL WARNING:', sau đó phân tích sự nguy hiểm của việc phình to dự án và tắc nghẽn. TUYỆT ĐỐI KHÔNG khen ngợi hay nói dự án đang 'on track'.
 
-      let scopeCreepInstruction = "";
-      if (typeof scopeCreepCount === 'number' && scopeCreepCount > 0) {
-        scopeCreepInstruction = `
-        Here is the scope creep data: ${scopeCreepCount} tasks were added after the sprint started.
-        RULE: If scopeCreepCount is greater than 0, you MUST explicitly warn about 'Scope Creep' in the 'Risk' section. You must state that adding tasks mid-sprint threatens the sprint goal and recommend strictly managing changes.
-        `;
-      }
+MUST return a valid JSON object with the following structure:
+{
+  "riskPercentage": A number from 0-100 indicating sprint delay risk,
+  "analysis": "Provide a 1-2 paragraph Executive Summary. Tell a 'data story' about the sprint's health, bottlenecks (if any based on cycle time or specific pending tasks), and next steps. Make it flow naturally. Use Markdown bold (**) to highlight key numbers or task IDs. DO NOT use 1,2,3 lists."
+}
+Note: Ensure 'analysis' supports line breaks (\\n) for UI display.`;
 
-      const prompt = `
-        You are a Senior Agile Coach.
-        Analyze the following project metrics for the current sprint and provide an Executive Summary in English.
-        Make it sound professional, natural, and insightful. Tell a 'data story'.
-        
-        Metrics:
-        - Total Sprint Points: ${totalPoints} pts
-        - Completed Points: ${completedPoints} pts
-        - Remaining Points: ${remainingPoints} pts
-        - Historical Velocity: ${velocity} pts
-        - Average Cycle Time: ${cycleTime} days
-        - Average Lead Time: ${leadTime} days
-        
-        Tasks CURRENTLY IN PROGRESS:
-        ${inProgressDetails || 'No tasks currently in progress.'}
-
-        ${scopeCreepInstruction}
-
-        MUST return a valid JSON object with the following structure:
-        {
-          "riskPercentage": A number from 0-100 indicating sprint delay risk,
-          "analysis": "Provide a 1-2 paragraph Executive Summary. Tell a 'data story' about the sprint's health, bottlenecks (if any based on cycle time or specific pending tasks), and next steps. Make it flow naturally. Use Markdown bold (**) to highlight key numbers or task IDs. DO NOT use 1,2,3 lists."
-        }
-        Note: Ensure 'analysis' supports line breaks (\\n) for UI display.
-      `;
-
-      let insightData = {
-        riskPercentage: 15,
-        analysis: `The sprint is currently on track with a solid velocity of **${velocity} pts**. There are no significant bottlenecks identified at the moment, but the team should maintain this momentum to ensure all remaining **${remainingPoints} pts** are delivered successfully.`
+      let insightData;
+      const hasDanger = (req.body.scopeCreepCount > 0 || req.body.atRiskCount > 0);
+      let fallbackInsightData = {
+        riskPercentage: hasDanger ? 85 : 15,
+        analysis: hasDanger
+          ? `⚠️ **CRITICAL WARNING:** This sprint is in **DANGER**. The team has allowed **${req.body.scopeCreepCount || 0}** scope creep tasks to be injected mid-sprint and currently has **${req.body.atRiskCount || 0}** bottleneck issues putting the goal at risk. You must immediately review these blockers and stop adding new tasks before addressing the stuck items.`
+          : `Great job! The team is doing well managing the workload with 0 scope creep tasks and 0 bottleneck issues identified.`
       };
-      
+
       const apiKey = process.env.GEMINI_API_KEY;
-      if (apiKey && apiKey !== 'mock-key' && apiKey !== 'MY_GEMINI_API_KEY') {
+      if (!apiKey || apiKey === 'mock-key' || apiKey === 'MY_GEMINI_API_KEY') {
+        insightData = fallbackInsightData;
+      } else {
         try {
           const response = await ai.models.generateContent({
-            model: 'gemini-3.1-flash-preview',
+            model: 'gemini-2.5-flash',
             contents: prompt,
             config: {
               responseMimeType: "application/json",
@@ -547,9 +531,12 @@ async function startServer() {
           
           if (response.text) {
             insightData = JSON.parse(response.text.trim());
+          } else {
+            insightData = fallbackInsightData;
           }
         } catch (e: any) {
           console.warn("Gemini API error (using fallback insight):", e.message || e);
+          insightData = fallbackInsightData;
         }
       }
 
@@ -560,41 +547,34 @@ async function startServer() {
     }
   });
 
-  app.get('/api/ai/retrospective', authenticateToken, async (req, res) => {
+  app.post('/api/ai/retrospective', authenticateToken, async (req, res) => {
     try {
       const sprintId = await getSprintId(req, res);
       if (!sprintId) return;
 
-      const allTasks = await prisma.task.findMany({ where: { sprintId } });
-      const completedTasks = allTasks.filter(t => t.status === 'Done' || t.status === 'closed' || t.status === 'Complete');
-      const inProgressTasks = allTasks.filter(t => t.status !== 'Done' && t.status !== 'closed' && t.status !== 'Complete');
+      const { tasks } = req.body || {};
+      const allTasks = tasks || await prisma.task.findMany({ where: { sprintId } });
+
+      const prompt = `Dựa vào danh sách task sau:
+      ${JSON.stringify(allTasks, null, 2)}
       
-      const completionRate = allTasks.length > 0 ? (completedTasks.length / allTasks.length) * 100 : 0;
-      const blockers = inProgressTasks.filter(t => t.status === 'Blocked' || t.title.toLowerCase().includes('bug'));
+      Hãy viết báo cáo Retrospective. Ở phần 'What went well', khen ngợi ĐÍCH DANH tên các Task đã Done. Ở phần 'What could be improved', nhắc ĐÍCH DANH các task đang In Progress hoặc Blocked (đặc biệt là các task có Story Points lớn). Trả về định dạng Markdown (###).
+      
+      Write the report in Markdown with exactly these 3 headings:
+      ### ✅ What went well
+      ### ❌ What could be improved
+      ### 🎯 Action Items`;
 
-      const prompt = `
-        You are an expert Agile Coach.
-        Generate a Sprint Retrospective Report based on these metrics:
-        - Total Tasks: ${allTasks.length}
-        - Completed: ${completedTasks.length} (${completionRate.toFixed(1)}%)
-        - Incomplete: ${inProgressTasks.length}
-        - Potential Blockers/Bugs detected: ${blockers.length}
-        
-        Write the report in Markdown with exactly these 3 headings:
-        ### ✅ What went well
-        ### ❌ What could be improved
-        ### 🎯 Action Items
-        
-        Make it actionable and natural. Avoid JSON, return raw markdown text.
-      `;
-
-      let retrospectiveMD = `### ✅ What went well\n- The team maintained good focus on core deliverables.\n- Stable completion rate for high-priority tasks.\n\n### ❌ What could be improved\n- Some tasks remained in progress at the end of the sprint.\n- A few blockers might have slowed down the momentum.\n\n### 🎯 Action Items\n- Review pending tasks in the backlog.\n- Discuss blockers in the next daily standup.\n- Plan capacity strictly for the next sprint.`;
+      let retrospectiveMD;
+      const fallbackRetro = `### ✅ What went well\n- The sprint progressed with focus on core deliverables.\n\n### ❌ What could be improved\n- High point story tasks need better swarming.\n- Scope creep tasks threatened the main sprint goal.\n\n### 🎯 Action Items\n- Stop accepting new scope during active sprints.\n- Review stalled tasks in the next standup.`;
       
       const apiKey = process.env.GEMINI_API_KEY;
-      if (apiKey && apiKey !== 'mock-key' && apiKey !== 'MY_GEMINI_API_KEY') {
+      if (!apiKey || apiKey === 'mock-key' || apiKey === 'MY_GEMINI_API_KEY') {
+        retrospectiveMD = fallbackRetro;
+      } else {
         try {
           const response = await ai.models.generateContent({
-            model: 'gemini-3.1-flash-preview',
+            model: 'gemini-2.5-flash',
             contents: prompt,
             config: {
               responseMimeType: "text/plain",
@@ -603,9 +583,12 @@ async function startServer() {
           
           if (response.text) {
             retrospectiveMD = response.text.trim();
+          } else {
+            retrospectiveMD = fallbackRetro;
           }
         } catch (e: any) {
-          console.warn("Gemini API error (using fallback retro):", e.message || e);
+          console.warn("Gemini retro error (using fallback retro):", e.message || e);
+          retrospectiveMD = fallbackRetro;
         }
       }
 
